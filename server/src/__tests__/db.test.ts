@@ -65,7 +65,7 @@ describe('migrasi v2 (channel → grup forum)', () => {
 
     // 2. Buka ulang → initDb menjalankan migrasi v2 lalu v3
     const fresh = initDb(tmp);
-    expect(fresh.pragma('user_version', { simple: true })).toBe(3);
+    expect(fresh.pragma('user_version', { simple: true })).toBe(4);
     expect(getSession(fresh)?.phone).toBe('+62');           // session selamat
     expect(listFiles(fresh)).toHaveLength(0);               // data channel lama dibersihkan
     const catNew = listCategories(fresh).find((c) => c.key === 'dokumen')!;
@@ -75,14 +75,14 @@ describe('migrasi v2 (channel → grup forum)', () => {
     fresh.close();
   });
 
-  it('idempoten: user_version=3 tidak menjalankan reset lagi', () => {
+  it('idempoten: user_version=4 tidak menjalankan reset lagi', () => {
     const tmp = `/tmp/td-mig2-${Date.now()}.sqlite`;
     const a = initDb(tmp);
     ensureCategories(a);
     upsertCategoryTopic(a, 'gambar', 55, 'Gambar');
-    a.close(); // initDb kedua: user_version sudah 3
+    a.close(); // initDb kedua: user_version sudah 4
     const b = initDb(tmp);
-    expect(b.pragma('user_version', { simple: true })).toBe(3);
+    expect(b.pragma('user_version', { simple: true })).toBe(4);
     expect(listCategories(b).find((c) => c.key === 'gambar')!.channelId).toBe(55); // tak direset
     b.close();
   });
