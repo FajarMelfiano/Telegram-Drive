@@ -224,6 +224,36 @@ export function listFiles(db: Db, opts: { categoryId?: number; limit?: number; o
   `).all(limit, offset) as RawFileRow[]).map(mapFileRow);
 }
 
+export interface SessionRow {
+  id: number; api_id: number; api_hash_enc: string; session_enc: string | null;
+  phone: string; tg_user_id: number | null; tg_name: string | null; created_at: string;
+}
+
+export function saveSession(db: Db, input: {
+  apiId: number; apiHashEnc: string; sessionEnc: string | null; phone: string;
+  tgUserId?: number | null; tgName?: string | null;
+}): void {
+  db.prepare(`
+    INSERT INTO tg_sessions (id, api_id, api_hash_enc, session_enc, phone, tg_user_id, tg_name, created_at)
+    VALUES (1, @apiId, @apiHashEnc, @sessionEnc, @phone, @tgUserId, @tgName, @createdAt)
+    ON CONFLICT(id) DO UPDATE SET
+      api_id = @apiId, api_hash_enc = @apiHashEnc, session_enc = @sessionEnc,
+      phone = @phone, tg_user_id = @tgUserId, tg_name = @tgName
+  `).run({
+    apiId: input.apiId, apiHashEnc: input.apiHashEnc, sessionEnc: input.sessionEnc,
+    phone: input.phone, tgUserId: input.tgUserId ?? null, tgName: input.tgName ?? null,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+export function getSession(db: Db): SessionRow | undefined {
+  return db.prepare('SELECT * FROM tg_sessions WHERE id = 1').get() as SessionRow | undefined;
+}
+
+export function deleteSession(db: Db): void {
+  db.prepare('DELETE FROM tg_sessions WHERE id = 1').run();
+}
+
 export function enqueueSync(db: Db, fileId: number): void {
   db.prepare('INSERT OR IGNORE INTO sync_queue (file_id, queued_at) VALUES (?, ?)').run(fileId, new Date().toISOString());
 }

@@ -1,0 +1,240 @@
+import { randomUUID } from 'node:crypto';
+import { createWriteStream } from 'node:fs';
+import { unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
+import { SignJWT, jwtVerify } from 'jose';
+import { z } from 'zod';
+import { parseQuery, classifyFile, CATEGORY_LABELS, type FileCategory } from '@td/shared';
+import {
+  initDb, ensureCategories, listCategories, getCategoryByKey, upsertCategoryChannel,
+  insertFile, searchFiles, listFiles, enqueueSync, getSyncStats,
+  saveSession, getSession, deleteSession,
+} from './db.js';
+import { encrypt, decrypt } from './crypto.js';
+import { mapTelegramError, type TelegramFactory, type TelegramGateway, createRealGateway } from './telegram.js';
+import type { AppConfig } from './config.js';
+
+export interface BuildAppOptions {
+  dbPath?: string;
+  config: Pick<AppConfig, 'MAX_FILE_BYTES'> & { TURNO_SECRET_KEY: string };
+  gatewayFactory?: TelegramFactory;
+}
+
+const AUTH_TTL_MS = 10 * 60 * 1000;
+
+const StartSchema = z.object({
+  apiId: z.number().int().positive(),
+  apiHash: z.string().min(10),
+  phone: z.string().regex(/^\+?\d{8,16}$/, 'nomor telepon tidak valid'),
+});
+
+interface PendingAuth {
+  gateway: TelegramGateway;
+  phone: string;
+  phoneCodeHash: string;
+  apiId: number;
+  apiHash: string;
+  createdAt: number;
+}
+
+export function buildApp(opts: BuildAppOptions): FastifyInstance {
+  const db = initDb(opts.dbPath ?? ':memory:');
+  ensureCategories(db);
+  const factory = opts.gatewayFactory ?? createRealGateway;
+  const secret = new TextEncoder().encode(opts.config.TURNO_SECRET_KEY);
+  const jwtKey = secret; // JWT memakai secret yang sama (personal-use)
+  const pending = new Map<string, PendingAuth>();
+  let cachedGateway: TelegramGateway | null = null;
+
+  const app = Fastify({ logger: false });
+  void app.register(cors, { origin: true });
+  void app.register(multipart, { limits: { fileSize: opts.config.MAX_FILE_BYTES, files: 1 } });
+
+  // ---- helper ----
+  const issueToken = async (): Promise<string> =>
+    new SignJWT({ sub: '1' }).setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt().setExpirationTime('30d').sign(jwtKey);
+
+  const requireAuth = async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const header = req.headers.authorization ?? '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    if (!token) { await reply.code(401).send({ error: 'UNAUTHORIZED' }); return; }
+    try {
+      const { payload } = await jwtVerify(token, jwtKey);
+      if (payload.sub !== '1') throw new Error('bad sub');
+    } catch {
+      await reply.code(401).send({ error: 'UNAUTHORIZED' });
+    }
+  };
+
+  const getGateway = async (): Promise<TelegramGateway | null> => {
+    if (cachedGateway) return cachedGateway;
+    const row = getSession(db);
+    if (!row?.session_enc) return null;
+    const apiHash = decrypt(row.api_hash_enc, opts.config.TURNO_SECRET_KEY);
+    const session = decrypt(row.session_enc, opts.config.TURNO_SECRET_KEY);
+    cachedGateway = await factory(row.api_id, apiHash, session);
+    return cachedGateway;
+  };
+
+  const sendMappedError = async (reply: FastifyReply, err: unknown): Promise<void> => {
+    const mapped = mapTelegramError(err);
+    const status = mapped.code === 'FLOOD_WAIT' ? 429
+      : mapped.code === 'PHONE_CODE_INVALID' || mapped.code === 'PASSWORD_INVALID' ? 401 : 400;
+    await reply.code(status).send({ error: mapped.code, retryAfterSeconds: mapped.retryAfterSeconds });
+  };
+
+  const finalizeLogin = async (flow: PendingAuth, requestId: string): Promise<FastifyReply | { token: string; me: unknown }> => {
+    const me = await flow.gateway.getMe();
+    saveSession(db, {
+      apiId: flow.apiId,
+      apiHashEnc: encrypt(flow.apiHash, opts.config.TURNO_SECRET_KEY),
+      sessionEnc: encrypt(flow.gateway.sessionString(), opts.config.TURNO_SECRET_KEY),
+      phone: flow.phone,
+      tgUserId: me.id,
+      tgName: me.firstName,
+    });
+    flow.gateway.destroy();
+    pending.delete(requestId);
+    return { token: await issueToken(), me };
+  };
+
+  // ---- routes: auth ----
+  app.post('/auth/start', async (req, reply) => {
+    const body = StartSchema.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'VALIDATION', details: body.error.issues });
+    const { apiId, apiHash, phone } = body.data;
+    try {
+      const gateway = await factory(apiId, apiHash);
+      const { phoneCodeHash } = await gateway.sendCode(phone);
+      const requestId = randomUUID();
+      pending.set(requestId, { gateway, phone, phoneCodeHash, apiId, apiHash, createdAt: Date.now() });
+      return { requestId };
+    } catch (err) {
+      return sendMappedError(reply, err);
+    }
+  });
+
+  const getFlow = (requestId: string): PendingAuth | null => {
+    const flow = pending.get(requestId);
+    if (!flow) return null;
+    if (Date.now() - flow.createdAt > AUTH_TTL_MS) {
+      flow.gateway.destroy();
+      pending.delete(requestId);
+      return null;
+    }
+    return flow;
+  };
+
+  app.post('/auth/verify', async (req, reply) => {
+    const body = z.object({ requestId: z.string(), code: z.string().min(3) }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'VALIDATION' });
+    const flow = getFlow(body.data.requestId);
+    if (!flow) return reply.code(404).send({ error: 'FLOW_EXPIRED' });
+    try {
+      const res = await flow.gateway.signIn(flow.phone, flow.phoneCodeHash, body.data.code);
+      if (res.twoFa) return { status: 'password_required' };
+      return finalizeLogin(flow, body.data.requestId);
+    } catch (err) {
+      return sendMappedError(reply, err);
+    }
+  });
+
+  app.post('/auth/password', async (req, reply) => {
+    const body = z.object({ requestId: z.string(), password: z.string().min(1) }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'VALIDATION' });
+    const flow = getFlow(body.data.requestId);
+    if (!flow) return reply.code(404).send({ error: 'FLOW_EXPIRED' });
+    try {
+      await flow.gateway.checkPassword(body.data.password);
+      return finalizeLogin(flow, body.data.requestId);
+    } catch (err) {
+      return sendMappedError(reply, err);
+    }
+  });
+
+  app.post('/auth/logout', { preHandler: requireAuth }, async () => {
+    cachedGateway?.destroy();
+    cachedGateway = null;
+    deleteSession(db);
+    return { ok: true };
+  });
+
+  app.get('/me', { preHandler: requireAuth }, async (req, reply) => {
+    const gateway = await getGateway();
+    if (!gateway) return reply.code(401).send({ error: 'NOT_LOGGED_IN' });
+    try {
+      const me = await gateway.getMe();
+      return { me, phone: getSession(db)?.phone ?? null };
+    } catch (err) {
+      return sendMappedError(reply, err);
+    }
+  });
+
+  // ---- routes: files ----
+  app.post('/files', { preHandler: requireAuth }, async (req, reply) => {
+    const gateway = await getGateway();
+    if (!gateway) return reply.code(401).send({ error: 'NOT_LOGGED_IN' });
+    if (!req.isMultipart()) return reply.code(400).send({ error: 'EXPECT_MULTIPART' });
+
+    const part = await req.file();
+    if (!part) return reply.code(400).send({ error: 'NO_FILE' });
+
+    const tempPath = join(tmpdir(), `td-upload-${randomUUID()}`);
+    try {
+      await pipeline(part.file, createWriteStream(tempPath));
+      const size = part.file.bytesRead;
+
+      const { category } = classifyFile(part.mimetype ?? '', part.filename ?? '');
+      const label = CATEGORY_LABELS[category as FileCategory];
+      const channel = await gateway.ensureCategoryChannel(`Drive · ${label}`, `Kategori ${label} — Telegram Drive`);
+      upsertCategoryChannel(db, category, channel.channelId, channel.title);
+
+      const cat = getCategoryByKey(db, category)!;
+      const name = part.filename ?? 'file';
+      const dot = name.lastIndexOf('.');
+      const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : null;
+      const sent = await gateway.sendFileToChannel(channel.channelId, tempPath, name);
+
+      const file = insertFile(db, {
+        fileUid: randomUUID(), name, ext, mime: part.mimetype ?? null, size,
+        uploadedAt: new Date().toISOString(), categoryId: cat.id,
+        channelId: sent.channelId, messageId: sent.messageId,
+      });
+      enqueueSync(db, file.id);
+      return { file };
+    } catch (err) {
+      return sendMappedError(reply, err);
+    } finally {
+      await unlink(tempPath).catch(() => undefined);
+    }
+  });
+
+  app.get('/files', { preHandler: requireAuth }, async (req) => {
+    const q = z.object({
+      category: z.string().optional(), limit: z.coerce.number().int().min(1).max(200).default(50),
+      offset: z.coerce.number().int().min(0).default(0),
+    }).parse(req.query);
+    const cat = q.category ? getCategoryByKey(db, q.category) : undefined;
+    return { files: listFiles(db, { categoryId: cat?.id, limit: q.limit, offset: q.offset }) };
+  });
+
+  app.get('/search', { preHandler: requireAuth }, async (req) => {
+    const q = z.object({ q: z.string().default(''), limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query);
+    const parsed = parseQuery(q.q);
+    return { parsed, results: searchFiles(db, parsed, q.limit) };
+  });
+
+  app.get('/categories', { preHandler: requireAuth }, async () => ({ categories: listCategories(db) }));
+
+  app.get('/sync/status', { preHandler: requireAuth }, async () => getSyncStats(db));
+
+  app.get('/health', async () => ({ ok: true }));
+
+  return app;
+}
