@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.expo/
+web-build/
+*.log
+.env
+.env.local
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+data/
+coverage/
+.DS_Store
