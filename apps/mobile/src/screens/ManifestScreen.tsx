@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Text, useWindowDimensions, View,
+  ActivityIndicator, FlatList, Modal, Platform, Pressable, RefreshControl, StyleSheet, Text, useWindowDimensions, View,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
@@ -25,9 +25,61 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
   const [notice, setNotice] = useState<string | null>(null);
   const [sync, setSync] = useState<{ pending: number; sent: number } | null>(null);
   const [drawer, setDrawer] = useState<FileRow | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [movePicker, setMovePicker] = useState(false);
   const { width } = useWindowDimensions();
   const narrow = width < 720;
   const router = useRouter();
+  const selecting = selected.size > 0;
+
+  const toggleSelect = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const clearSelection = () => setSelected(new Set());
+
+  const ids = () => [...selected];
+
+  const batchDelete = async () => {
+    setBatchBusy(true); setNotice(null);
+    try {
+      const res = await Api.batch(token, 'delete', ids());
+      const ok = res.results.filter((r) => r.ok).length;
+      setNotice(`Menghapus ${ok} file`);
+      clearSelection();
+      await load();
+    } catch (err) {
+      setNotice(err instanceof ApiError ? `Gagal (${err.code})` : 'Server tidak terjangkau.');
+    } finally { setBatchBusy(false); }
+  };
+
+  const batchMove = async (category: string) => {
+    setBatchBusy(true); setNotice(null); setMovePicker(false);
+    try {
+      const res = await Api.batch(token, 'move', ids(), { category });
+      const ok = res.results.filter((r) => r.ok).length;
+      setNotice(`Memindahkan ${ok} file ke ${category.toUpperCase()}`);
+      clearSelection();
+      await load();
+    } catch (err) {
+      setNotice(err instanceof ApiError ? `Gagal (${err.code})` : 'Server tidak terjangkau.');
+    } finally { setBatchBusy(false); }
+  };
+
+  const batchZip = () => {
+    // Unduh massal sebagai ZIP (server streaming STORE). Buka di tab/browser baru.
+    const url = Api.zipUrl(token, ids());
+    if (Platform.OS === 'web') {
+      (globalThis as unknown as { open: (u: string, t?: string) => void }).open(url, '_blank');
+    } else {
+      void import('react-native').then(({ Linking }) => Linking.openURL(url));
+    }
+    setNotice(`Mengunduh ZIP ${selected.size} file…`);
+  };
 
   const load = useCallback(async () => {
     try {
@@ -138,7 +190,9 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
                   file={item}
                   index={index}
                   token={token}
-                  onPress={setDrawer}
+                  selected={selected.has(item.id)}
+                  onLongPress={(f) => toggleSelect(f.id)}
+                  onPress={selecting ? (f) => toggleSelect(f.id) : setDrawer}
                   onDownload={(f) => void handleDownload(f)}
                 />
               )}
@@ -157,20 +211,42 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
 
       <View style={styles.footer}>
         {notice && <Text style={styles.notice} numberOfLines={2}>{notice}</Text>}
-        <Pressable
-          onPress={() => void pickAndUpload()}
-          disabled={uploading}
-          style={({ pressed }) => [styles.uploadBtn, uploading && { opacity: 0.6 }, pressed && { opacity: 0.85 }]}
-        >
-          {uploading
-            ? <ActivityIndicator color={color.base} />
-            : (
-              <View style={styles.uploadInner}>
-                <Upload size={16} strokeWidth={1.5} color={color.base} />
-                <Text style={styles.uploadText}>UNGGAH FILE</Text>
-              </View>
-            )}
-        </Pressable>
+        {selecting ? (
+          <View style={styles.batchBar}>
+            <Text style={styles.batchCount}>{selected.size} DIPILIH</Text>
+            <View style={styles.batchActions}>
+              <Pressable onPress={() => batchZip()} disabled={batchBusy} style={({ pressed }) => [styles.batchBtn, pressed && { opacity: 0.7 }]}>
+                <Text style={styles.batchBtnText}>ZIP</Text>
+              </Pressable>
+              <Pressable onPress={() => setMovePicker(true)} disabled={batchBusy}
+                style={({ pressed }) => [styles.batchBtn, pressed && { opacity: 0.7 }]}>
+                <Text style={styles.batchBtnText}>PINDAH</Text>
+              </Pressable>
+              <Pressable onPress={() => void batchDelete()} disabled={batchBusy}
+                style={({ pressed }) => [styles.batchBtnDanger, batchBusy && { opacity: 0.5 }, pressed && { opacity: 0.8 }]}>
+                <Text style={styles.batchBtnDangerText}>HAPUS</Text>
+              </Pressable>
+              <Pressable onPress={clearSelection} style={({ pressed }) => [styles.batchBtn, pressed && { opacity: 0.7 }]}>
+                <Text style={styles.batchBtnText}>BATAL</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : (
+          <Pressable
+            onPress={() => void pickAndUpload()}
+            disabled={uploading}
+            style={({ pressed }) => [styles.uploadBtn, uploading && { opacity: 0.6 }, pressed && { opacity: 0.85 }]}
+          >
+            {uploading
+              ? <ActivityIndicator color={color.base} />
+              : (
+                <View style={styles.uploadInner}>
+                  <Upload size={16} strokeWidth={1.5} color={color.base} />
+                  <Text style={styles.uploadText}>UNGGAH FILE</Text>
+                </View>
+              )}
+          </Pressable>
+        )}
       </View>
 
       <FileDrawer
@@ -181,6 +257,22 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
         onDownload={handleDownload}
         onChanged={() => void load()}
       />
+
+      {/* Picker pindah massal */}
+      <Modal visible={movePicker} transparent animationType="fade" onRequestClose={() => setMovePicker(false)}>
+        <View style={styles.pickerRoot}>
+          <Pressable style={styles.pickerBackdrop} onPress={() => setMovePicker(false)} />
+          <View style={styles.pickerBox}>
+            <Text style={styles.pickerTitle}>PINDAH {selected.size} FILE KE</Text>
+            {categories.map((c) => (
+              <Pressable key={c.key} onPress={() => void batchMove(c.key)}
+                style={({ pressed }) => [styles.pickerRow, pressed && { backgroundColor: color.surfaceAlt }]}>
+                <Text style={styles.pickerRowText}>{c.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -219,4 +311,23 @@ const styles = StyleSheet.create({
   uploadBtn: { backgroundColor: color.amber, borderRadius: radius.control, paddingVertical: space(3.5), alignItems: 'center' },
   uploadInner: { flexDirection: 'row', alignItems: 'center', gap: space(2) },
   uploadText: { color: color.base, fontWeight: '700', letterSpacing: 1.5, fontSize: fontSize.sm },
+  batchBar: { gap: space(2) },
+  batchCount: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber, letterSpacing: 1.5 },
+  batchActions: { flexDirection: 'row', gap: space(2), flexWrap: 'wrap' },
+  batchBtn: {
+    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
+    paddingVertical: space(2.5), paddingHorizontal: space(3),
+  },
+  batchBtnText: { color: color.textMuted, fontFamily: font.mono, fontSize: fontSize.xs, letterSpacing: 1 },
+  batchBtnDanger: { backgroundColor: color.red, borderRadius: radius.control, paddingVertical: space(2.5), paddingHorizontal: space(3) },
+  batchBtnDangerText: { color: color.base, fontFamily: font.mono, fontSize: fontSize.xs, letterSpacing: 1, fontWeight: '700' },
+  pickerRoot: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  pickerBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.6)' },
+  pickerBox: { width: '82%', maxWidth: 380, backgroundColor: color.surface, borderWidth: 1, borderColor: color.hairline, padding: space(4) },
+  pickerTitle: { fontFamily: font.mono, fontSize: fontSize.sm, color: color.amber, letterSpacing: 2, marginBottom: space(3) },
+  pickerRow: {
+    paddingVertical: space(3), paddingHorizontal: space(2),
+    borderBottomWidth: 1, borderBottomColor: color.hairline,
+  },
+  pickerRowText: { color: color.textPrimary, fontSize: fontSize.base },
 });

@@ -55,19 +55,32 @@ function TypeTile({ file, token, size = 32 }: { file: FileRow; token: string | n
  * pill status, tombol unduh. Ketuk baris → drawer detail (onPress).
  */
 export const ManifestRow = memo(function ManifestRow({
-  file, index, token, onPress, onDownload,
+  file, index, token, onPress, onDownload, selected, onLongPress,
 }: {
   file: FileRow;
   index: number;
   token: string | null;
   onPress?: (file: FileRow) => void;
   onDownload?: (file: FileRow) => void;
+  selected?: boolean;
+  onLongPress?: (file: FileRow) => void;
 }) {
   return (
     <Pressable
       onPress={() => onPress?.(file)}
-      style={({ pressed }) => [styles.row, pressed && onPress && { backgroundColor: color.surfaceAlt }]}
+      onLongPress={() => onLongPress?.(file)}
+      delayLongPress={280}
+      style={({ pressed }) => [
+        styles.row,
+        pressed && (onPress || onLongPress) && { backgroundColor: color.surfaceAlt },
+        selected && { backgroundColor: color.surfaceAlt, borderLeftWidth: 2, borderLeftColor: color.amber },
+      ]}
     >
+      {selected != null && (
+        <View style={[styles.checkbox, selected && styles.checkboxOn]}>
+          {selected && <Text style={styles.checkMark}>✓</Text>}
+        </View>
+      )}
       <Text style={styles.index} numberOfLines={1}>
         {String(index + 1).padStart(4, '0')}
       </Text>
@@ -109,6 +122,12 @@ const styles = StyleSheet.create({
     borderBottomColor: color.hairline,
   },
   index: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, width: 30 },
+  checkbox: {
+    width: 18, height: 18, borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  checkboxOn: { backgroundColor: color.amber, borderColor: color.amber },
+  checkMark: { color: color.base, fontSize: 12, fontWeight: '700' },
   tile: { alignItems: 'center', justifyContent: 'center', borderWidth: 1 },
   main: { flex: 1, minWidth: 0 },
   name: { color: color.textPrimary, fontSize: fontSize.base },
