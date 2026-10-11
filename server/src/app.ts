@@ -91,6 +91,8 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   };
 
   const sendMappedError = async (reply: FastifyReply, err: unknown): Promise<void> => {
+    // Log error asli dulu — tanpa ini, akar masalah tak terlihat dari mana pun.
+    console.error('[auth] telegram error asli:', err instanceof Error ? `${err.name}: ${err.message}` : err);
     const mapped = mapTelegramError(err);
     const status = mapped.code === 'FLOOD_WAIT' ? 429
       : mapped.code === 'PHONE_CODE_INVALID' || mapped.code === 'PASSWORD_INVALID' ? 401 : 400;

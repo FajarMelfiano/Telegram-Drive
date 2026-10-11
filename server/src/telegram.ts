@@ -40,20 +40,25 @@ export type TelegramFactory = (apiId: number, apiHash: string, session?: string)
 /** Error API Telegram → kode ramah aplikasi. */
 export function mapTelegramError(err: unknown): { code: string; retryAfterSeconds?: number } {
   const msg = err instanceof Error ? err.message : String(err);
-  const anyErr = err as { seconds?: number; errorCode?: number };
-  if (/FLOOD_WAIT/i.test(msg)) {
-    return { code: 'FLOOD_WAIT', retryAfterSeconds: anyErr.seconds ?? extractSeconds(msg) };
+  // teleproto 1.23: err.message = teks human-readable ("API ID invalid."),
+  // sedangkan kode mentah ada di err.errorMessage ("API_ID_INVALID"),
+  // dan FloodWaitError menyimpan detik di properti .seconds.
+  // Karena itu pencocokan WAJIB memakai errorMessage + seconds, bukan message saja.
+  const rpc = err as { errorMessage?: string; seconds?: number };
+  const haystack = `${rpc.errorMessage ?? ''} ${msg}`;
+  if (typeof rpc.seconds === 'number' || /FLOOD_WAIT_?\d+/i.test(haystack)) {
+    return { code: 'FLOOD_WAIT', retryAfterSeconds: rpc.seconds ?? extractSeconds(msg) };
   }
-  if (/PHONE_CODE_INVALID|PHONE_CODE_EXPIRED/.test(msg)) return { code: 'PHONE_CODE_INVALID' };
-  if (/PHONE_NUMBER_INVALID/.test(msg)) return { code: 'PHONE_NUMBER_INVALID' };
-  if (/SESSION_PASSWORD_NEEDED/.test(msg)) return { code: 'SESSION_PASSWORD_NEEDED' };
-  if (/PASSWORD_HASH_INVALID/.test(msg)) return { code: 'PASSWORD_INVALID' };
-  if (/API_ID_INVALID|API_HASH_INVALID/.test(msg)) return { code: 'API_INVALID' };
+  if (/PHONE_CODE_INVALID|PHONE_CODE_EXPIRED/.test(haystack)) return { code: 'PHONE_CODE_INVALID' };
+  if (/PHONE_NUMBER_INVALID/.test(haystack)) return { code: 'PHONE_NUMBER_INVALID' };
+  if (/SESSION_PASSWORD_NEEDED/.test(haystack)) return { code: 'SESSION_PASSWORD_NEEDED' };
+  if (/PASSWORD_HASH_INVALID/.test(haystack)) return { code: 'PASSWORD_INVALID' };
+  if (/API_ID_INVALID|API_HASH_INVALID/.test(haystack)) return { code: 'API_INVALID' };
   return { code: 'TELEGRAM_ERROR' };
 }
 
 function extractSeconds(msg: string): number | undefined {
-  const m = /FLOOD_WAIT_?(\d+)/i.exec(msg);
+  const m = /FLOOD_WAIT_?(\d+)/i.exec(msg) ?? /wait (\d+) seconds/i.exec(msg);
   return m ? parseInt(m[1]!, 10) : undefined;
 }
 
@@ -90,7 +95,9 @@ export class TeleprotoGateway implements TelegramGateway {
       await this.client.invoke(new Api.auth.SignIn({ phoneNumber: phone, phoneCodeHash, phoneCode: code }));
       return { twoFa: false };
     } catch (err) {
-      if (/SESSION_PASSWORD_NEEDED/i.test(String(err))) return { twoFa: true };
+      // Cek via errorMessage (kode mentah) — pesan teleproto human-readable,
+      // String(err) tidak pernah berisi "SESSION_PASSWORD_NEEDED".
+      if (mapTelegramError(err).code === 'SESSION_PASSWORD_NEEDED') return { twoFa: true };
       throw err;
     }
   }
