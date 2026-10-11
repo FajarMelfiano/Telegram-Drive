@@ -1,0 +1,66 @@
+/**
+ * Google Apps Script — Web App untuk sinkron Telegram Drive → Google Sheets.
+ *
+ * Cara pakai:
+ * 1. Buka Google Sheets baru (mis. "Telegram Drive Manifest").
+ * 2. Extensions → Apps Script, tempel file ini.
+ * 3. Ganti TOKEN di bawah dengan string acak (mis. hasil Math.random).
+ * 4. Deploy → New deployment → Web app:
+ *    - Execute as: Me
+ *    - Who has access: Anyone
+ * 5. Salin URL /exec → tempel ke SHEETS_WEBHOOK_URL di .env server.
+ * 6. Isi token yang sama ke SHEETS_TOKEN di .env.
+ *
+ * Sinkron idempoten: baris dengan UID sama tidak akan diduplikasi.
+ */
+const TOKEN = 'GANTI_DENGAN_TOKEN_ACAK';
+const SHEET_NAME = 'Manifest';
+const HEADER = ['UID', 'Nama', 'Ekstensi', 'MIME', 'Ukuran (byte)', 'Kategori', 'Channel ID', 'Message ID', 'Tanggal Upload', 'Status'];
+
+function doPost(e) {
+  try {
+    const headers = (e.requestHeaders || []).reduce((acc, h) => {
+      acc[h.name.toLowerCase()] = h.value;
+      return acc;
+    }, {});
+    if (headers['x-sheets-token'] !== TOKEN) {
+      return ContentService.createTextOutput(JSON.stringify({ ok: false, error: 'unauthorized' }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    const payload = JSON.parse(e.postData.contents);
+    const rows = payload.rows || [];
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
+
+    if (sheet.getLastRow() === 0) {
+      sheet.appendRow(HEADER);
+      sheet.getRange(1, 1, 1, HEADER.length).setFontWeight('bold');
+    }
+
+    // Peta UID yang sudah ada (kolom A) supaya sinkron idempoten
+    const existing = {};
+    if (sheet.getLastRow() > 1) {
+      sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues().forEach((r) => {
+        existing[String(r[0])] = true;
+      });
+    }
+
+    let added = 0;
+    const toAppend = [];
+    rows.forEach((r) => {
+      if (existing[String(r.uid)]) return;
+      toAppend.push([r.uid, r.nama, r.ekstensi, r.mime, r.ukuran, r.kategori, r.channelId, r.messageId, r.tanggal, r.status]);
+      added += 1;
+    });
+    if (toAppend.length > 0) {
+      sheet.getRange(sheet.getLastRow() + 1, 1, toAppend.length, HEADER.length).setValues(toAppend);
+    }
+
+    return ContentService.createTextOutput(JSON.stringify({ ok: true, added }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}

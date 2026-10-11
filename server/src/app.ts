@@ -17,6 +17,7 @@ import {
 } from './db.js';
 import { encrypt, decrypt } from './crypto.js';
 import { mapTelegramError, type TelegramFactory, type TelegramGateway, createRealGateway } from './telegram.js';
+import { buildXlsxBuffer } from './sync.js';
 import type { AppConfig } from './config.js';
 
 export interface BuildAppOptions {
@@ -234,7 +235,22 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
 
   app.get('/sync/status', { preHandler: requireAuth }, async () => getSyncStats(db));
 
+  app.get('/logs.xlsx', { preHandler: requireAuth }, async (req, reply) => {
+    const buf = await buildXlsxBuffer(db);
+    return reply
+      .header('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      .header('content-disposition', 'attachment; filename="telegram-drive-manifest.xlsx"')
+      .send(buf);
+  });
+
   app.get('/health', async () => ({ ok: true }));
 
+  app.decorate('db', db);
   return app;
+}
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    db: import('better-sqlite3').Database;
+  }
 }

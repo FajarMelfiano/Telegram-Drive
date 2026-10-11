@@ -11,7 +11,17 @@ const EnvSchema = z.object({
   DB_PATH: z.string().default('./data/telegram-drive.sqlite'),
 });
 
-export type AppConfig = z.infer<typeof EnvSchema>;
+/** Setelah loadConfig, semua secret dijamin terisi. */
+export interface AppConfig {
+  PORT: number;
+  TURNO_SECRET_KEY: string;
+  JWT_SECRET: string;
+  SHEETS_WEBHOOK_URL: string;
+  SHEETS_TOKEN: string;
+  SHEET_SYNC_INTERVAL_MS: number;
+  MAX_FILE_BYTES: number;
+  DB_PATH: string;
+}
 
 /** Hasilkan secret di .env: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -22,5 +32,5 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (!cfg.JWT_SECRET) {
     throw new Error('JWT_SECRET wajib diisi (min 32 karakter) — lihat .env.example');
   }
-  return cfg;
+  return { ...cfg, TURNO_SECRET_KEY: cfg.TURNO_SECRET_KEY, JWT_SECRET: cfg.JWT_SECRET };
 }
