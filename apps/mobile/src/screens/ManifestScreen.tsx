@@ -170,7 +170,14 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
         </Pressable>
       </View>
 
-      <FileDrawer file={drawer} token={token} onClose={() => setDrawer(null)} onDownload={handleDownload} />
+      <FileDrawer
+        file={drawer}
+        token={token}
+        categories={categories}
+        onClose={() => setDrawer(null)}
+        onDownload={handleDownload}
+        onChanged={() => void load()}
+      />
     </View>
   );
 }

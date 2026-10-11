@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator, FlatList, Pressable, ScrollView,
   StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { Search } from 'lucide-react-native';
-import { Api, ApiError, downloadFile, type FileRow, type ParsedQuery } from '../api';
+import { Api, ApiError, downloadFile, type CategoryRow, type FileRow, type ParsedQuery } from '../api';
 import { ManifestRow } from '../components/ManifestRow';
 import { FileDrawer } from '../components/FileDrawer';
 import { color, font, fontSize, radius, space } from '../theme';
@@ -35,6 +35,12 @@ export function SearchScreen({ token }: { token: string }) {
   const [results, setResults] = useState<FileRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<FileRow | null>(null);
+  const [categories, setCategories] = useState<CategoryRow[]>([]);
+
+  // Muat daftar kategori (untuk pindah kategori di drawer).
+  useEffect(() => {
+    void Api.categories(token).then((c) => setCategories(c.categories)).catch(() => undefined);
+  }, [token]);
 
   const run = async (query: string) => {
     if (!query.trim()) return;
@@ -134,7 +140,13 @@ export function SearchScreen({ token }: { token: string }) {
         )}
       </View>
 
-      <FileDrawer file={drawer} token={token} onClose={() => setDrawer(null)} onDownload={handleDownload} />
+      <FileDrawer
+        file={drawer}
+        token={token}
+        categories={categories}
+        onClose={() => setDrawer(null)}
+        onDownload={handleDownload}
+      />
     </View>
   );
 }

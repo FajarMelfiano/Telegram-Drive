@@ -1,6 +1,10 @@
-import { Image, Linking, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { Download, ExternalLink, X } from 'lucide-react-native';
-import { fileDownloadUrl, type FileRow } from '../api';
+import { useEffect, useState } from 'react';
+import {
+  Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable,
+  ScrollView, StyleSheet, Text, TextInput, View,
+} from 'react-native';
+import { Check, Download, ExternalLink, FolderInput, Plus, Tag, Trash2, X } from 'lucide-react-native';
+import { Api, ApiError, fileDownloadUrl, type CategoryRow, type FileRow } from '../api';
 import { glyphFor, tinted } from '../fileType';
 import { color, font, fontSize, radius, space, stateColor } from '../theme';
 
@@ -25,17 +29,39 @@ function Meta({ label, value, accent }: { label: string; value: string; accent?:
 }
 
 /**
- * Drawer detail file (bottom sheet): preview, metadata manifest, aksi unduh
- * dan buka pesan asli di Telegram. Menutup: tap backdrop / tombol X / Esc.
+ * Drawer detail file v2 (bottom sheet) — "like a drive app": preview inline,
+ * ubah nama, tag, pindah kategori, hapus. Menutup: tap backdrop / X / Esc.
+ * Semua aksi memanggil server lalu memanggil onDeleted/onUpdated agar daftar
+ * di belakang ikut tersinkron.
  */
 export function FileDrawer({
-  file, token, onClose, onDownload,
+  file, token, categories, onClose, onDownload, onChanged,
 }: {
   file: FileRow | null;
   token: string | null;
+  categories: CategoryRow[];
   onClose: () => void;
   onDownload: (file: FileRow) => void;
+  onChanged?: () => void;
 }) {
+  const [name, setName] = useState('');
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState('');
+  const [editingName, setEditingName] = useState(false);
+  const [showMove, setShowMove] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Sinkronkan state lokal saat file berganti (drawer dipakai ulang).
+  useEffect(() => {
+    setName(file?.displayName || file?.name || '');
+    setTags(file?.tags ?? []);
+    setTagInput('');
+    setEditingName(false);
+    setShowMove(false);
+    setErr(null);
+  }, [file]);
+
   if (!file) return null;
   const glyph = glyphFor(file.ext);
   const uploaded = new Date(file.uploadedAt);
@@ -45,9 +71,62 @@ export function FileDrawer({
     ? `https://t.me/c/${file.channelId}/${file.messageId}`
     : null;
 
+  const fail = (e: unknown) => setErr(e instanceof ApiError ? `Gagal (${e.code})` : 'Server tidak terjangkau.');
+
+  const saveName = async () => {
+    if (!name.trim()) { setErr('Nama tidak boleh kosong.'); return; }
+    setBusy(true); setErr(null);
+    try {
+      await Api.rename(token, file.id, name.trim());
+      setEditingName(false);
+      onChanged?.();
+    } catch (e) { fail(e); } finally { setBusy(false); }
+  };
+
+  const addTag = async () => {
+    const t = tagInput.trim().toLowerCase();
+    if (!t || tags.includes(t)) return;
+    const next = [...tags, t];
+    setBusy(true); setErr(null);
+    try {
+      const res = await Api.setTags(token, file.id, next);
+      setTags(res.file.tags ?? next);
+      setTagInput('');
+      onChanged?.();
+    } catch (e) { fail(e); } finally { setBusy(false); }
+  };
+
+  const removeTag = async (t: string) => {
+    const next = tags.filter((x) => x !== t);
+    setBusy(true); setErr(null);
+    try {
+      const res = await Api.setTags(token, file.id, next);
+      setTags(res.file.tags ?? next);
+      onChanged?.();
+    } catch (e) { fail(e); } finally { setBusy(false); }
+  };
+
+  const moveTo = async (category: string) => {
+    setBusy(true); setErr(null);
+    try {
+      await Api.moveFile(token, file.id, category);
+      setShowMove(false);
+      onChanged?.();
+    } catch (e) { fail(e); } finally { setBusy(false); }
+  };
+
+  const remove = async () => {
+    setBusy(true); setErr(null);
+    try {
+      await Api.removeFile(token, file.id);
+      onChanged?.();
+      onClose();
+    } catch (e) { fail(e); } finally { setBusy(false); }
+  };
+
   return (
     <Modal visible animationType="slide" transparent onRequestClose={onClose}>
-      <View style={styles.root}>
+      <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel="Tutup detail" />
         <View style={styles.sheet}>
           <View style={styles.handle} />
@@ -57,7 +136,18 @@ export function FileDrawer({
               <glyph.Icon size={22} strokeWidth={1.5} color={glyph.color} />
             </View>
             <View style={styles.headMain}>
-              <Text style={styles.name} numberOfLines={2}>{file.name}</Text>
+              {editingName ? (
+                <TextInput
+                  style={styles.nameInput}
+                  value={name}
+                  onChangeText={setName}
+                  autoFocus
+                  onSubmitEditing={() => void saveName()}
+                  placeholderTextColor={color.textFaint}
+                />
+              ) : (
+                <Text style={styles.name} numberOfLines={2}>{file.displayName || file.name}</Text>
+              )}
               <Text style={styles.subline}>
                 {(file.ext ?? 'tanpa ekstensi').toUpperCase()} · {formatSize(file.size)} · {file.categoryKey.toUpperCase()}
               </Text>
@@ -77,41 +167,91 @@ export function FileDrawer({
               </View>
             )}
 
+            {/* Tag */}
+            <View style={styles.block}>
+              <Text style={styles.blockLabel}>TAG</Text>
+              <View style={styles.tagWrap}>
+                {tags.map((t) => (
+                  <Pressable key={t} onPress={() => void removeTag(t)} style={styles.tagChip}>
+                    <Text style={styles.tagText}>{t}</Text>
+                    <X size={11} strokeWidth={2} color={color.textMuted} />
+                  </Pressable>
+                ))}
+                <View style={styles.tagAdd}>
+                  <Tag size={12} strokeWidth={1.5} color={color.textFaint} />
+                  <TextInput
+                    style={styles.tagInput}
+                    value={tagInput}
+                    onChangeText={setTagInput}
+                    onSubmitEditing={() => void addTag()}
+                    placeholder="tambah tag"
+                    placeholderTextColor={color.textFaint}
+                    autoCapitalize="none"
+                  />
+                  <Pressable onPress={() => void addTag()} hitSlop={6}>
+                    <Plus size={14} strokeWidth={2} color={color.amber} />
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+
             <View style={styles.metaBox}>
               <Meta label="BARIS" value={`#${String(file.id).padStart(4, '0')}`} />
               <Meta label="STATUS" value={STATUS_LABEL[file.state] ?? file.state.toUpperCase()} accent={stateColor[file.state] ?? color.greyState} />
               <Meta label="DIUNGGAH" value={dateStr} />
               <Meta label="TOPIK" value={file.categoryKey.toUpperCase()} />
-              {file.channelId != null && (
-                <Meta label="GRUP" value={String(file.channelId)} />
-              )}
-              {file.messageId != null && (
-                <Meta label="PESAN" value={`#${file.messageId}`} />
-              )}
+              {file.source && <Meta label="SUMBER" value={file.source.toUpperCase()} />}
+              {file.channelId != null && <Meta label="GRUP" value={String(file.channelId)} />}
+              {file.messageId != null && <Meta label="PESAN" value={`#${file.messageId}`} />}
             </View>
+
+            {/* Pindah kategori */}
+            {showMove && (
+              <View style={styles.moveBox}>
+                <Text style={styles.blockLabel}>PINDAH KE LORONG</Text>
+                {categories.filter((c) => c.key !== file.categoryKey).map((c) => (
+                  <Pressable key={c.key} onPress={() => void moveTo(c.key)} style={({ pressed }) => [styles.moveRow, pressed && { backgroundColor: color.surfaceAlt }]}>
+                    <Text style={styles.moveText}>{c.label}</Text>
+                    {c.key === file.categoryKey && <Check size={14} strokeWidth={1.5} color={color.amber} />}
+                  </Pressable>
+                ))}
+              </View>
+            )}
+
+            {err && <Text style={styles.err}>{err}</Text>}
           </ScrollView>
 
           <View style={styles.actions}>
-            <Pressable
-              onPress={() => onDownload(file)}
-              style={({ pressed }) => [styles.dlBtn, pressed && { opacity: 0.85 }]}
-              accessibilityLabel={`Unduh ${file.name}`}
-            >
+            <Pressable onPress={() => onDownload(file)} style={({ pressed }) => [styles.dlBtn, pressed && { opacity: 0.85 }]} accessibilityLabel={`Unduh ${file.name}`}>
               <Download size={16} strokeWidth={1.5} color={color.base} />
               <Text style={styles.dlText}>UNDUH</Text>
             </Pressable>
-            {tgUrl && (
-              <Pressable
-                onPress={() => void Linking.openURL(tgUrl)}
-                style={({ pressed }) => [styles.tgBtn, pressed && { opacity: 0.7 }]}
-              >
-                <ExternalLink size={16} strokeWidth={1.5} color={color.amber} />
-                <Text style={styles.tgText}>TELEGRAM</Text>
-              </Pressable>
-            )}
+            <Pressable onPress={() => setEditingName(true)} style={({ pressed }) => [styles.secBtn, pressed && { opacity: 0.7 }]}>
+              <Text style={styles.secText}>UBAH NAMA</Text>
+            </Pressable>
+            <Pressable onPress={() => setShowMove((s) => !s)} style={({ pressed }) => [styles.secBtn, pressed && { opacity: 0.7 }]}>
+              <FolderInput size={15} strokeWidth={1.5} color={color.amber} />
+            </Pressable>
+            <Pressable onPress={() => void remove()} disabled={busy} style={({ pressed }) => [styles.delBtn, busy && { opacity: 0.5 }, pressed && { opacity: 0.8 }]}>
+              <Trash2 size={16} strokeWidth={1.5} color={color.base} />
+            </Pressable>
           </View>
+
+          {editingName && (
+            <Pressable onPress={() => void saveName()} style={({ pressed }) => [styles.saveBtn, pressed && { opacity: 0.85 }]}>
+              <Check size={16} strokeWidth={2} color={color.base} />
+              <Text style={styles.saveText}>SIMPAN NAMA</Text>
+            </Pressable>
+          )}
+
+          {tgUrl && (
+            <Pressable onPress={() => void Linking.openURL(tgUrl)} style={({ pressed }) => [styles.tgBtn, pressed && { opacity: 0.7 }]}>
+              <ExternalLink size={14} strokeWidth={1.5} color={color.amber} />
+              <Text style={styles.tgText}>BUKA DI TELEGRAM</Text>
+            </Pressable>
+          )}
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -122,26 +262,39 @@ const styles = StyleSheet.create({
   sheet: {
     backgroundColor: color.surface,
     borderTopWidth: 1, borderTopColor: color.hairline,
-    maxHeight: '85%', minHeight: 340,
+    maxHeight: '90%', minHeight: 360,
     paddingHorizontal: space(4), paddingTop: space(2), paddingBottom: space(5),
   },
-  handle: {
-    alignSelf: 'center', width: 36, height: 3, borderRadius: 2,
-    backgroundColor: color.hairline, marginBottom: space(3),
-  },
+  handle: { alignSelf: 'center', width: 36, height: 3, borderRadius: 2, backgroundColor: color.hairline, marginBottom: space(3) },
   head: { flexDirection: 'row', alignItems: 'center', gap: space(3), paddingBottom: space(3), borderBottomWidth: 1, borderBottomColor: color.hairline },
   tile: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderRadius: radius.control },
   headMain: { flex: 1, minWidth: 0 },
   name: { color: color.textPrimary, fontSize: fontSize.md, fontWeight: '600' },
+  nameInput: {
+    borderWidth: 1, borderColor: color.amberDim, borderRadius: radius.control, backgroundColor: color.base,
+    color: color.textPrimary, paddingHorizontal: space(2), paddingVertical: space(1.5), fontSize: fontSize.md,
+  },
   subline: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 0.5, marginTop: 2 },
   closeBtn: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control },
   body: { flexGrow: 0 },
-  previewImg: { height: 240, marginTop: space(3), backgroundColor: color.base },
-  previewBox: {
-    marginTop: space(3), height: 180, alignItems: 'center', justifyContent: 'center', gap: space(3),
-    backgroundColor: color.base, borderWidth: 1, borderColor: color.hairline,
-  },
+  previewImg: { height: 220, marginTop: space(3), backgroundColor: color.base },
+  previewBox: { marginTop: space(3), height: 160, alignItems: 'center', justifyContent: 'center', gap: space(3), backgroundColor: color.base, borderWidth: 1, borderColor: color.hairline },
   previewHint: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 1 },
+  block: { marginTop: space(3) },
+  blockLabel: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 1, marginBottom: space(2) },
+  tagWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: space(2), alignItems: 'center' },
+  tagChip: {
+    flexDirection: 'row', alignItems: 'center', gap: space(1.5),
+    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.chip,
+    paddingHorizontal: space(2.5), paddingVertical: space(1),
+  },
+  tagText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textPrimary },
+  tagAdd: {
+    flexDirection: 'row', alignItems: 'center', gap: space(1.5),
+    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.chip,
+    paddingHorizontal: space(2.5), paddingVertical: space(1), minWidth: 120,
+  },
+  tagInput: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textPrimary, minWidth: 70, padding: 0 },
   metaBox: { marginTop: space(3), borderWidth: 1, borderColor: color.hairline },
   metaRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
@@ -150,16 +303,39 @@ const styles = StyleSheet.create({
   },
   metaLabel: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 1 },
   metaValue: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textPrimary, flexShrink: 1, textAlign: 'right' },
-  actions: { flexDirection: 'row', gap: space(2), paddingTop: space(3) },
+  moveBox: { marginTop: space(3), borderWidth: 1, borderColor: color.hairline },
+  moveRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: space(3), paddingVertical: space(3),
+    borderBottomWidth: 1, borderBottomColor: color.hairline,
+  },
+  moveText: { color: color.textPrimary, fontSize: fontSize.sm },
+  err: { color: color.red, fontSize: fontSize.xs, fontFamily: font.mono, marginTop: space(3) },
+  actions: { flexDirection: 'row', gap: space(2), paddingTop: space(3), alignItems: 'center' },
   dlBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space(2),
     backgroundColor: color.amber, borderRadius: radius.control, paddingVertical: space(3),
   },
   dlText: { color: color.base, fontWeight: '700', letterSpacing: 1.5, fontSize: fontSize.sm },
+  secBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
+    paddingVertical: space(3), paddingHorizontal: space(3),
+  },
+  secText: { color: color.textMuted, fontFamily: font.mono, fontSize: fontSize.xs, letterSpacing: 1 },
+  delBtn: {
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: color.red, borderRadius: radius.control, paddingVertical: space(3), paddingHorizontal: space(3),
+  },
+  saveBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space(2),
+    backgroundColor: color.green, borderRadius: radius.control, paddingVertical: space(3), marginTop: space(2),
+  },
+  saveText: { color: color.base, fontWeight: '700', letterSpacing: 1.5, fontSize: fontSize.sm },
   tgBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space(2),
     borderWidth: 1, borderColor: color.amberDim, borderRadius: radius.control,
-    paddingVertical: space(3), paddingHorizontal: space(4),
+    paddingVertical: space(2.5), marginTop: space(2),
   },
   tgText: { color: color.amber, fontFamily: font.mono, fontSize: fontSize.xs, letterSpacing: 1 },
 });
