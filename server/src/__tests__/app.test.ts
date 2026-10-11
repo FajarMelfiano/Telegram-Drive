@@ -530,6 +530,56 @@ describe('aksi massal (batch)', () => {
   });
 });
 
+describe('zip massal', () => {
+  it('menghasilkan arsip ZIP valid berisi file yang diminta (nama unicode aman)', async () => {
+    const token = await login();
+    const a = (await upload(token, 'laporan.pdf', 'application/pdf', 'isi-pdf-1')).json() as { file: { id: number; messageId: number } };
+    const b = (await upload(token, 'foto 🌴.jpg', 'image/jpeg', 'isi-jpg-2')).json() as { file: { id: number; messageId: number } };
+
+    const res = await app.inject({ method: 'GET', url: `/files/zip?ids=${a.file.id},${b.file.id}`, headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('application/zip');
+    expect(String(res.headers['content-disposition'])).toContain('attachment');
+
+    const buf = res.rawPayload;
+    // signature lokal "PK\x03\x04" di awal & EOCD "PK\x05\x06" di akhir
+    expect(buf.subarray(0, 4).toString('latin1')).toBe('PK\u0003\u0004');
+    expect(buf.subarray(buf.length - 22, buf.length - 18).toString('latin1')).toBe('PK\u0005\u0006');
+    // isi file terkunci di dalam (STORE → plaintext; FakeGateway menulis ISI-REMOTE-<msgId>)
+    expect(buf.toString('latin1')).toContain(`ISI-REMOTE-${a.file.messageId}`);
+    expect(buf.toString('latin1')).toContain(`ISI-REMOTE-${b.file.messageId}`);
+    // EOCD: jumlah entri = 2
+    expect(buf.readUInt16LE(buf.length - 12)).toBe(2);
+    // nama unicode ter-encode UTF-8 penuh
+    expect(buf.toString('utf8')).toContain('foto 🌴.jpg');
+  });
+
+  it('nama duplikat dalam satu zip diringkas " (2)"; id tak dikenal dilewati', async () => {
+    const token = await login();
+    const a = (await upload(token, 'sama.pdf', 'application/pdf', 'x')).json() as { file: { id: number } };
+    const b = (await upload(token, 'sama.pdf', 'application/pdf', 'y')).json() as { file: { id: number } };
+
+    const res = await app.inject({ method: 'GET', url: `/files/zip?ids=${a.file.id},${b.file.id},99999`, headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(200);
+    const text = res.rawPayload.toString('utf8');
+    expect(text).toContain('sama.pdf');
+    expect(text).toContain('sama (2).pdf');
+    expect(res.rawPayload.readUInt16LE(res.rawPayload.length - 12)).toBe(2); // 99999 dilewati
+  });
+
+  it('semua id tak dikenal → 404; ids kosong → 422; >20 id → 422; tanpa auth → 401', async () => {
+    const token = await login();
+    const none = await app.inject({ method: 'GET', url: '/files/zip?ids=99998,99999', headers: { authorization: `Bearer ${token}` } });
+    expect(none.statusCode).toBe(404);
+    const empty = await app.inject({ method: 'GET', url: '/files/zip?ids=', headers: { authorization: `Bearer ${token}` } });
+    expect(empty.statusCode).toBe(422);
+    const many = await app.inject({ method: 'GET', url: `/files/zip?ids=${Array.from({ length: 21 }, (_, i) => i + 1).join(',')}`, headers: { authorization: `Bearer ${token}` } });
+    expect(many.statusCode).toBe(422);
+    const noAuth = await app.inject({ method: 'GET', url: '/files/zip?ids=1' });
+    expect(noAuth.statusCode).toBe(401);
+  });
+});
+
 describe('search', () => {
   it('parser + FTS menemukan file yang baru diupload', async () => {
     const token = await login();

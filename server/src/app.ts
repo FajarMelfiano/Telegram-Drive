@@ -24,6 +24,7 @@ import {
 import { encrypt, decrypt } from './crypto.js';
 import { mapTelegramError, type TelegramFactory, type TelegramGateway, createRealGateway } from './telegram.js';
 import { buildXlsxBuffer } from './sync.js';
+import { createZipStream } from './zip.js';
 import type { AppConfig } from './config.js';
 
 export interface BuildAppOptions {
@@ -566,6 +567,41 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     } finally {
       await unlink(tempPath).catch(() => undefined);
     }
+  });
+
+  /**
+   * Unduh massal sebagai satu arsip ZIP (streaming, method STORE — file Telegram
+   * sudah terkompresi). Maksimal 20 file per request (batas personal-use).
+   * Satu file gagal diunduh → entri dilewati (tak mematikan seluruh stream).
+   */
+  app.get('/files/zip', { preHandler: requireAuth }, async (req, reply) => {
+    const q = z.object({ ids: z.string().min(1).max(1000) }).safeParse(req.query);
+    if (!q.success) return reply.code(422).send({ error: 'VALIDATION', details: q.error.issues });
+    const ids = [...new Set(q.data.ids.split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0))];
+    if (ids.length === 0) return reply.code(422).send({ error: 'VALIDATION', details: [{ message: 'ids kosong' }] });
+    if (ids.length > 20) return reply.code(422).send({ error: 'VALIDATION', details: [{ message: 'maksimal 20 file per arsip' }] });
+    const gateway = await getGateway();
+    if (!gateway) return reply.code(401).send({ error: 'NOT_LOGGED_IN' });
+
+    const files = ids
+      .map((id) => getFileById(db, id))
+      .filter((f): f is NonNullable<typeof f> => f != null && f.channelId != null && f.messageId != null);
+    if (files.length === 0) return reply.code(404).send({ error: 'FILE_NOT_FOUND' });
+
+    const stream = createZipStream(
+      files.map((f) => ({
+        name: f.name,
+        fetch: async (dest: string): Promise<boolean> => {
+          await gateway.downloadFile(f.channelId!, f.messageId!, dest);
+          return true;
+        },
+      })),
+      tmpdir(),
+    );
+    return reply
+      .header('content-type', 'application/zip')
+      .header('content-disposition', 'attachment; filename="telegram-drive-batch.zip"')
+      .send(stream);
   });
 
   /**
