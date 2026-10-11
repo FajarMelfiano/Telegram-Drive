@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash, randomBytes } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,6 +15,8 @@ import {
   insertFile, searchFiles, listFiles, enqueueSync, getSyncStats, getFileById,
   saveSession, getSession, deleteSession,
   getDriveGroup, saveDriveGroup, clearDriveGroup, resetCategoryTopics,
+  upsertDevice, listDevices, deleteDevice, saveRefreshToken, findRefreshToken,
+  revokeRefreshToken, revokeAllTokensForDevice,
 } from './db.js';
 import { encrypt, decrypt } from './crypto.js';
 import { mapTelegramError, type TelegramFactory, type TelegramGateway, createRealGateway } from './telegram.js';
@@ -28,6 +30,45 @@ export interface BuildAppOptions {
 }
 
 const AUTH_TTL_MS = 10 * 60 * 1000;
+const ACCESS_TTL = '30d';
+const REFRESH_TTL_DAYS = 30;
+const REFRESH_COOKIE = 'td_refresh';
+
+/** Hash SHA-256 → hex (untuk menyimpan refresh token di DB tanpa plaintext). */
+function sha256(input: string): string {
+  return createHash('sha256').update(input).digest('hex');
+}
+
+/** Parse header Cookie mentah → objek. */
+function parseCookies(header: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (k) out[k] = decodeURIComponent(v);
+  }
+  return out;
+}
+
+/** Set cookie refresh httpOnly (path /, maxAge 30 hari). Secure hanya bila https. */
+function setRefreshCookie(reply: FastifyReply, token: string, secure: boolean): void {
+  const attrs = [
+    `${REFRESH_COOKIE}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${REFRESH_TTL_DAYS * 24 * 60 * 60}`,
+  ];
+  if (secure) attrs.push('Secure');
+  reply.header('set-cookie', attrs.join('; '));
+}
+
+function clearRefreshCookie(reply: FastifyReply): void {
+  reply.header('set-cookie', `${REFRESH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+}
 
 /** Satu grup forum tunggal; tiap kategori jadi topik di dalamnya. */
 export const DRIVE_GROUP_TITLE = 'Telegram Drive';
@@ -62,15 +103,38 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   void app.register(multipart, { limits: { fileSize: opts.config.MAX_FILE_BYTES, files: 1 } });
 
   // ---- helper ----
-  const issueToken = async (): Promise<string> =>
+  const issueAccessToken = async (): Promise<string> =>
     new SignJWT({ sub: '1' }).setProtectedHeader({ alg: 'HS256' })
-      .setIssuedAt().setExpirationTime('30d').sign(jwtKey);
+      .setIssuedAt().setExpirationTime(ACCESS_TTL).sign(jwtKey);
+
+  /**
+   * Terbitkan pasangan akses + refresh untuk sebuah device. Refresh token mentah
+   * hanya dikembalikan ke client (untuk cookie httpOnly); yang disimpan di DB
+   * hanya hash-nya. Akses token berumur 30 hari (personal-use).
+   */
+  const issueTokens = async (deviceId: number): Promise<{ accessToken: string; refreshToken: string }> => {
+    const refreshToken = randomBytes(32).toString('base64url');
+    const expiresAt = new Date(Date.now() + REFRESH_TTL_DAYS * 86400_000).toISOString();
+    saveRefreshToken(db, sha256(refreshToken), deviceId, expiresAt);
+    const accessToken = await issueAccessToken();
+    return { accessToken, refreshToken };
+  };
+
+  /** Deteksi apakah request datang dari https (untuk flag Secure cookie). */
+  const isSecure = (req: FastifyRequest): boolean => {
+    const proto = req.headers['x-forwarded-proto'];
+    if (typeof proto === 'string') return proto.split(',')[0]!.trim() === 'https';
+    return req.protocol === 'https';
+  };
 
   const requireAuth = async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const header = req.headers.authorization ?? '';
     const q = req.query as { token?: unknown };
     const queryToken = typeof q.token === 'string' ? q.token : '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : queryToken;
+    const cookieToken = parseCookies(req.headers.cookie)[REFRESH_COOKIE];
+    // Urutan prioritas: Bearer (mobile) → ?token= (link/gambar) → cookie (web).
+    const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+    const token = bearer || queryToken || cookieToken;
     if (!token) { await reply.code(401).send({ error: 'UNAUTHORIZED' }); return; }
     try {
       const { payload } = await jwtVerify(token, jwtKey);
@@ -141,7 +205,9 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     }
   };
 
-  const finalizeLogin = async (flow: PendingAuth, requestId: string): Promise<FastifyReply | { token: string; me: unknown }> => {
+  const finalizeLogin = async (
+    flow: PendingAuth, requestId: string, req: FastifyRequest, reply: FastifyReply,
+  ): Promise<{ token: string; refreshToken: string; me: unknown }> => {
     const me = await flow.gateway.getMe();
     saveSession(db, {
       apiId: flow.apiId,
@@ -151,9 +217,15 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
       tgUserId: me.id,
       tgName: me.firstName,
     });
+    // Catat device + terbitkan akses & refresh (cookie httpOnly untuk web).
+    const ua = req.headers['user-agent'] ?? null;
+    const device = upsertDevice(db, req.body && (req.body as { deviceLabel?: string }).deviceLabel
+      ? String((req.body as { deviceLabel?: string }).deviceLabel) : (ua ?? 'unknown'), ua);
+    const { accessToken, refreshToken } = await issueTokens(device.id);
+    setRefreshCookie(reply, refreshToken, isSecure(req));
     flow.gateway.destroy();
     pending.delete(requestId);
-    return { token: await issueToken(), me };
+    return { token: accessToken, refreshToken, me };
   };
 
   // ---- routes: auth ----
@@ -191,7 +263,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     try {
       const res = await flow.gateway.signIn(flow.phone, flow.phoneCodeHash, body.data.code);
       if (res.twoFa) return { status: 'password_required' };
-      return finalizeLogin(flow, body.data.requestId);
+      return finalizeLogin(flow, body.data.requestId, req, reply);
     } catch (err) {
       return sendMappedError(reply, err);
     }
@@ -204,16 +276,53 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     if (!flow) return reply.code(404).send({ error: 'FLOW_EXPIRED' });
     try {
       await flow.gateway.checkPassword(body.data.password);
-      return finalizeLogin(flow, body.data.requestId);
+      return finalizeLogin(flow, body.data.requestId, req, reply);
     } catch (err) {
       return sendMappedError(reply, err);
     }
   });
 
-  app.post('/auth/logout', { preHandler: requireAuth }, async () => {
+  app.post('/auth/logout', { preHandler: requireAuth }, async (req, reply) => {
+    // Cabut refresh token milik device ini (kalau ada) + clear cookie.
+    const cookieRefresh = parseCookies(req.headers.cookie)[REFRESH_COOKIE];
+    if (cookieRefresh) revokeRefreshToken(db, sha256(cookieRefresh));
     cachedGateway?.destroy();
     cachedGateway = null;
     deleteSession(db);
+    clearRefreshCookie(reply);
+    return { ok: true };
+  });
+
+  /**
+   * Rotasi refresh token: tukar refresh lama → pasangan akses + refresh baru.
+   * Menerima refresh dari cookie httpOnly ATAU body (mobile). Token lama dicabut.
+   */
+  app.post('/auth/refresh', async (req, reply) => {
+    const bodyRefresh = (req.body as { refreshToken?: unknown } | undefined)?.refreshToken;
+    const cookieRefresh = parseCookies(req.headers.cookie)[REFRESH_COOKIE];
+    const raw = typeof bodyRefresh === 'string' ? bodyRefresh : cookieRefresh;
+    if (!raw) return reply.code(401).send({ error: 'NO_REFRESH_TOKEN' });
+    const row = findRefreshToken(db, sha256(raw));
+    if (!row || row.revokedAt || new Date(row.expiresAt).getTime() < Date.now()) {
+      clearRefreshCookie(reply);
+      return reply.code(401).send({ error: 'REFRESH_INVALID' });
+    }
+    revokeRefreshToken(db, sha256(raw)); // rotasi: token lama tak bisa dipakai lagi
+    const deviceId = row.deviceId ?? upsertDevice(db, req.headers['user-agent'] ?? 'unknown', req.headers['user-agent'] ?? null).id;
+    const { accessToken, refreshToken } = await issueTokens(deviceId);
+    setRefreshCookie(reply, refreshToken, isSecure(req));
+    return { token: accessToken, refreshToken };
+  });
+
+  // ---- routes: devices (manajemen sesi per-perangkat) ----
+  app.get('/devices', { preHandler: requireAuth }, async () => ({ devices: listDevices(db) }));
+
+  app.delete('/devices/:id', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    const device = listDevices(db).find((d) => d.id === id);
+    if (!device) return reply.code(404).send({ error: 'DEVICE_NOT_FOUND' });
+    revokeAllTokensForDevice(db, id);
+    deleteDevice(db, id);
     return { ok: true };
   });
 

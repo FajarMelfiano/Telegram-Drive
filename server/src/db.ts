@@ -450,3 +450,118 @@ export function getSyncStats(db: Db): { pending: number; sent: number } {
   `).get() as { pending: number | null; sent: number | null };
   return { pending: row.pending ?? 0, sent: row.sent ?? 0 };
 }
+
+// ---- activity log ----
+
+export interface ActivityRow { id: number; type: string; detail: unknown; createdAt: string }
+
+export function logActivity(db: Db, type: string, detail?: unknown): void {
+  db.prepare('INSERT INTO activity (type, detail, created_at) VALUES (?, ?, ?)')
+    .run(type, detail != null ? JSON.stringify(detail) : null, new Date().toISOString());
+}
+
+export function listActivity(db: Db, limit = 50): ActivityRow[] {
+  const rows = db.prepare('SELECT id, type, detail, created_at FROM activity ORDER BY id DESC LIMIT ?')
+    .all(limit) as Array<{ id: number; type: string; detail: string | null; created_at: string }>;
+  return rows.map((r) => {
+    let detail: unknown = null;
+    try { detail = r.detail ? JSON.parse(r.detail) : null; } catch { detail = null; }
+    return { id: r.id, type: r.type, detail, createdAt: r.created_at };
+  });
+}
+
+// ---- devices & refresh token ----
+
+export interface DeviceRow { id: number; label: string; userAgent: string | null; createdAt: string; lastSeenAt: string }
+
+export function upsertDevice(db: Db, label: string, userAgent: string | null): DeviceRow {
+  const existing = db.prepare('SELECT * FROM devices WHERE label = ? AND COALESCE(user_agent, \'\') = COALESCE(?, \'\')')
+    .get(label, userAgent) as { id: number; label: string; user_agent: string | null; created_at: string; last_seen_at: string } | undefined;
+  const now = new Date().toISOString();
+  if (existing) {
+    db.prepare('UPDATE devices SET last_seen_at = ? WHERE id = ?').run(now, existing.id);
+    return { id: existing.id, label: existing.label, userAgent: existing.user_agent, createdAt: existing.created_at, lastSeenAt: now };
+  }
+  const res = db.prepare('INSERT INTO devices (label, user_agent, created_at, last_seen_at) VALUES (?, ?, ?, ?)')
+    .run(label, userAgent, now, now);
+  return { id: Number(res.lastInsertRowid), label, userAgent, createdAt: now, lastSeenAt: now };
+}
+
+export function listDevices(db: Db): DeviceRow[] {
+  const rows = db.prepare('SELECT * FROM devices ORDER BY last_seen_at DESC').all() as
+    Array<{ id: number; label: string; user_agent: string | null; created_at: string; last_seen_at: string }>;
+  return rows.map((r) => ({ id: r.id, label: r.label, userAgent: r.user_agent, createdAt: r.created_at, lastSeenAt: r.last_seen_at }));
+}
+
+export function getDevice(db: Db, id: number): DeviceRow | undefined {
+  return listDevices(db).find((d) => d.id === id);
+}
+
+export function deleteDevice(db: Db, id: number): void {
+  db.prepare('DELETE FROM refresh_tokens WHERE device_id = ?').run(id);
+  db.prepare('DELETE FROM devices WHERE id = ?').run(id);
+}
+
+/** Simpan refresh token (hanya hash-nya). Rotasi: token lama dicabut saat refresh. */
+export function saveRefreshToken(db: Db, tokenHash: string, deviceId: number, expiresAt: string): void {
+  db.prepare('INSERT INTO refresh_tokens (token_hash, device_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
+    .run(tokenHash, deviceId, new Date().toISOString(), expiresAt);
+}
+
+export function findRefreshToken(db: Db, tokenHash: string): { id: number; deviceId: number | null; expiresAt: string; revokedAt: string | null } | undefined {
+  const r = db.prepare('SELECT id, device_id, expires_at, revoked_at FROM refresh_tokens WHERE token_hash = ?')
+    .get(tokenHash) as { id: number; device_id: number | null; expires_at: string; revoked_at: string | null } | undefined;
+  return r ? { id: r.id, deviceId: r.device_id, expiresAt: r.expires_at, revokedAt: r.revoked_at } : undefined;
+}
+
+export function revokeRefreshToken(db: Db, tokenHash: string): void {
+  db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
+    .run(new Date().toISOString(), tokenHash);
+}
+
+export function revokeAllTokensForDevice(db: Db, deviceId: number): void {
+  db.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL')
+    .run(new Date().toISOString(), deviceId);
+}
+
+// ---- pairing code (login web via QR dari HP) ----
+
+export interface PairingRow { code: string; expiresAt: string; claimedAt: string | null; deviceLabel: string | null }
+
+export function savePairingCode(db: Db, code: string, expiresAt: string, deviceLabel: string | null): void {
+  db.prepare('INSERT OR REPLACE INTO pairing_codes (code, created_at, expires_at, claimed_at, device_label) VALUES (?, ?, ?, NULL, ?)')
+    .run(code, new Date().toISOString(), expiresAt, deviceLabel);
+}
+
+export function getPairingCode(db: Db, code: string): PairingRow | undefined {
+  const r = db.prepare('SELECT code, expires_at, claimed_at, device_label FROM pairing_codes WHERE code = ?')
+    .get(code) as { code: string; expires_at: string; claimed_at: string | null; device_label: string | null } | undefined;
+  return r ? { code: r.code, expiresAt: r.expires_at, claimedAt: r.claimed_at, deviceLabel: r.device_label } : undefined;
+}
+
+/** Klaim atomik: hanya berhasil sekali (single-use). */
+export function claimPairingCode(db: Db, code: string): boolean {
+  const res = db.prepare('UPDATE pairing_codes SET claimed_at = ? WHERE code = ? AND claimed_at IS NULL')
+    .run(new Date().toISOString(), code);
+  return res.changes > 0;
+}
+
+export function cleanupExpiredPairing(db: Db): void {
+  db.prepare('DELETE FROM pairing_codes WHERE expires_at < ?').run(new Date().toISOString());
+}
+
+// ---- kv store (nilai terenkripsi, mis. auth state WhatsApp) ----
+
+export function kvSet(db: Db, key: string, value: string): void {
+  db.prepare('INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = @value, updated_at = @updatedAt')
+    .run(key, value, new Date().toISOString());
+}
+
+export function kvGet(db: Db, key: string): string | undefined {
+  const r = db.prepare('SELECT value FROM kv WHERE key = ?').get(key) as { value: string } | undefined;
+  return r?.value;
+}
+
+export function kvDelete(db: Db, key: string): void {
+  db.prepare('DELETE FROM kv WHERE key = ?').run(key);
+}

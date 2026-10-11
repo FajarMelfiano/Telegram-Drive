@@ -83,6 +83,18 @@ async function login(): Promise<string> {
   return (verify.json() as { token: string }).token;
 }
 
+/** Login lengkap: ambil token akses, refresh token mentah, dan cookie header. */
+async function loginFull(): Promise<{ token: string; refreshToken: string; cookie: string }> {
+  const start = await app.inject({ method: 'POST', url: '/auth/start', payload: { apiId: 1, apiHash: 'abcdefghij', phone: '+628123456789' } });
+  const { requestId } = start.json() as { requestId: string };
+  const verify = await app.inject({ method: 'POST', url: '/auth/verify', payload: { requestId, code: '12345' } });
+  const body = verify.json() as { token: string; refreshToken: string };
+  const setCookie = verify.headers['set-cookie'];
+  const cookieStr = Array.isArray(setCookie) ? setCookie.join('; ') : String(setCookie ?? '');
+  const cookieHeader = cookieStr.split(';')[0] ?? '';
+  return { token: body.token, refreshToken: body.refreshToken, cookie: cookieHeader };
+}
+
 function upload(token: string, filename: string, mime: string, content: string) {
   const mp = multipart(filename, mime, content);
   return app.inject({
@@ -126,6 +138,65 @@ describe('auth flow', () => {
   it('request tanpa token ditolak 401', async () => {
     const res = await app.inject({ method: 'GET', url: '/files' });
     expect(res.statusCode).toBe(401);
+  });
+});
+
+describe('cookie httpOnly + refresh token', () => {
+  it('login menyetel cookie refresh httpOnly dan /me bisa dipakai lewat cookie', async () => {
+    const start = await app.inject({ method: 'POST', url: '/auth/start', payload: { apiId: 1, apiHash: 'abcdefghij', phone: '+628123456789' } });
+    const { requestId } = start.json() as { requestId: string };
+    const verify = await app.inject({ method: 'POST', url: '/auth/verify', payload: { requestId, code: '12345' } });
+    const setCookie = verify.headers['set-cookie'] as string[] | string | undefined;
+    const cookies = Array.isArray(setCookie) ? setCookie : [String(setCookie ?? '')];
+    const refresh = cookies.find((c) => c.startsWith('td_refresh='));
+    expect(refresh).toBeTruthy();
+    expect(refresh).toContain('HttpOnly');
+    expect(refresh).toContain('Path=/');
+    expect(refresh).toContain('SameSite=Lax');
+  });
+
+  it('/auth/refresh menukar refresh lama → token baru + refresh baru (rotasi)', async () => {
+    const { refreshToken } = await loginFull();
+    const res = await app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { token: string; refreshToken: string };
+    expect(body.token).toBeTruthy();
+    expect(body.refreshToken).toBeTruthy();
+    expect(body.refreshToken).not.toBe(refreshToken); // rotasi: refresh baru berbeda
+
+    // refresh lama sudah dicabut → dipakai lagi ditolak
+    const reuse = await app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } });
+    expect(reuse.statusCode).toBe(401);
+  });
+
+  it('/auth/refresh tanpa token → 401; refresh palsu → 401 + cookie dibersihkan', async () => {
+    const none = await app.inject({ method: 'POST', url: '/auth/refresh', payload: {} });
+    expect(none.statusCode).toBe(401);
+    const fake = await app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken: 'bukan-token' } });
+    expect(fake.statusCode).toBe(401);
+    expect(String(fake.headers['set-cookie'] ?? '')).toContain('Max-Age=0');
+  });
+});
+
+describe('devices (manajemen sesi)', () => {
+  it('login membuat device; /devices menampilkannya; delete mencabut sesi', async () => {
+    const { token } = await loginFull();
+    const list = await app.inject({ method: 'GET', url: '/devices', headers: { authorization: `Bearer ${token}` } });
+    expect(list.statusCode).toBe(200);
+    const { devices } = list.json() as { devices: Array<{ id: number; label: string }> };
+    expect(devices.length).toBeGreaterThanOrEqual(1);
+
+    const target = devices[0]!;
+    const del = await app.inject({ method: 'DELETE', url: `/devices/${target.id}`, headers: { authorization: `Bearer ${token}` } });
+    expect(del.statusCode).toBe(200);
+    const after = await app.inject({ method: 'GET', url: '/devices', headers: { authorization: `Bearer ${token}` } });
+    expect((after.json() as { devices: Array<{ id: number }> }).devices.find((d) => d.id === target.id)).toBeUndefined();
+  });
+
+  it('delete device tak dikenal → 404', async () => {
+    const { token } = await loginFull();
+    const del = await app.inject({ method: 'DELETE', url: '/devices/99999', headers: { authorization: `Bearer ${token}` } });
+    expect(del.statusCode).toBe(404);
   });
 });
 
