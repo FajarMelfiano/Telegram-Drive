@@ -746,6 +746,77 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
       .send(buf);
   });
 
+  // ---- routes: album (koleksi manual lintas kategori) ----
+  // Album = kumpulan file buatan tangan (bukan topik/kategori baru).
+  // Kategori = klasifikasi otomatis; album = kurasi manual.
+
+  /** Daftar semua album + jumlah file. */
+  app.get('/albums', { preHandler: requireAuth }, async () => ({ albums: listAlbums(db) }));
+
+  /** Buat album baru. */
+  app.post('/albums', { preHandler: requireAuth }, async (req, reply) => {
+    const body = z.object({ name: z.string().trim().min(1).max(80) }).safeParse(req.body);
+    if (!body.success) return reply.code(422).send({ error: 'VALIDATION', details: body.error.issues });
+    return { album: createAlbum(db, body.data.name) };
+  });
+
+  /** Detail satu album (metadata). */
+  app.get('/albums/:id', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    const album = getAlbum(db, id);
+    if (!album) return reply.code(404).send({ error: 'ALBUM_NOT_FOUND' });
+    return { album };
+  });
+
+  /** Ganti nama album. */
+  app.patch('/albums/:id', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    const body = z.object({ name: z.string().trim().min(1).max(80) }).safeParse(req.body);
+    if (!body.success) return reply.code(422).send({ error: 'VALIDATION', details: body.error.issues });
+    if (!getAlbum(db, id)) return reply.code(404).send({ error: 'ALBUM_NOT_FOUND' });
+    renameAlbum(db, id, body.data.name);
+    return { album: getAlbum(db, id) };
+  });
+
+  /** Hapus album (file aslinya TETAP ada di gudang — hanya koleksinya yang hilang). */
+  app.delete('/albums/:id', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    if (!deleteAlbum(db, id)) return reply.code(404).send({ error: 'ALBUM_NOT_FOUND' });
+    recordActivity('album.deleted', { id });
+    return { ok: true };
+  });
+
+  /** Isi album: daftar file terurut posisi. */
+  app.get('/albums/:id/files', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    if (!getAlbum(db, id)) return reply.code(404).send({ error: 'ALBUM_NOT_FOUND' });
+    return { files: listAlbumFiles(db, id) };
+  });
+
+  /** Tambahkan file ke album (idempoten — id duplikat diabaikan). */
+  app.post('/albums/:id/files', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    const body = z.object({ fileIds: z.array(z.number().int().positive()).min(1).max(100) }).safeParse(req.body);
+    if (!body.success) return reply.code(422).send({ error: 'VALIDATION', details: body.error.issues });
+    if (!getAlbum(db, id)) return reply.code(404).send({ error: 'ALBUM_NOT_FOUND' });
+    // buang id file yang tak ada (addToAlbum pakai INSERT OR IGNORE, tapi validasi dulu supaya jelas)
+    const valid = body.data.fileIds.filter((fid) => getFileById(db, fid) != null);
+    const added = addToAlbum(db, id, valid);
+    recordActivity('album.updated', { id, added });
+    return { added, files: listAlbumFiles(db, id) };
+  });
+
+  /** Keluarkan satu file dari album (file tetap tersimpan di gudang). */
+  app.delete('/albums/:id/files/:fileId', { preHandler: requireAuth }, async (req, reply) => {
+    const { id, fileId } = z.object({
+      id: z.coerce.number().int().positive(), fileId: z.coerce.number().int().positive(),
+    }).parse(req.params);
+    if (!getAlbum(db, id)) return reply.code(404).send({ error: 'ALBUM_NOT_FOUND' });
+    if (!removeFromAlbum(db, id, fileId)) return reply.code(404).send({ error: 'ALBUM_FILE_NOT_FOUND' });
+    recordActivity('album.updated', { id, removed: fileId });
+    return { ok: true };
+  });
+
   // ---- routes: statistik & riwayat aktivitas ----
 
   /** Dasbor penyimpanan: total, per kategori, per ekstensi, per sumber. */

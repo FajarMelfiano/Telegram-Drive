@@ -875,3 +875,79 @@ describe('integrasi WhatsApp', () => {
     expect(results.some((r) => r.name === 'kwitansi-warung.pdf' && r.source === 'whatsapp')).toBe(true);
   });
 });
+
+describe('album (koleksi manual)', () => {
+  it('alur penuh: buat → tambah file → daftar file → rename → hapus album (file tetap di gudang)', async () => {
+    const token = await login();
+    const a = (await upload(token, 'a.pdf', 'application/pdf', 'x')).json() as { file: { id: number } };
+    const b = (await upload(token, 'b.jpg', 'image/jpeg', 'x')).json() as { file: { id: number } };
+
+    // buat
+    const created = await app.inject({ method: 'POST', url: '/albums', headers: { authorization: `Bearer ${token}` }, payload: { name: 'Liburan 2026' } });
+    expect(created.statusCode).toBe(200);
+    const { album } = created.json() as { album: { id: number; name: string; fileCount: number } };
+    expect(album.name).toBe('Liburan 2026');
+    expect(album.fileCount).toBe(0);
+
+    // tambah dua file
+    const add = await app.inject({ method: 'POST', url: `/albums/${album.id}/files`, headers: { authorization: `Bearer ${token}` }, payload: { fileIds: [a.file.id, b.file.id] } });
+    expect(add.statusCode).toBe(200);
+    expect((add.json() as { added: number }).added).toBe(2);
+
+    // idempoten: tambah lagi → added 0
+    const again = await app.inject({ method: 'POST', url: `/albums/${album.id}/files`, headers: { authorization: `Bearer ${token}` }, payload: { fileIds: [a.file.id] } });
+    expect((again.json() as { added: number }).added).toBe(0);
+
+    // daftar file terurut
+    const listF = await app.inject({ method: 'GET', url: `/albums/${album.id}/files`, headers: { authorization: `Bearer ${token}` } });
+    const files = (listF.json() as { files: Array<{ id: number }> }).files;
+    expect(files.map((f) => f.id)).toEqual([a.file.id, b.file.id]);
+
+    // rename
+    const ren = await app.inject({ method: 'PATCH', url: `/albums/${album.id}`, headers: { authorization: `Bearer ${token}` }, payload: { name: 'Renamed' } });
+    expect((ren.json() as { album: { name: string } }).album.name).toBe('Renamed');
+
+    // daftar album memuat album + fileCount 2
+    const listA = await app.inject({ method: 'GET', url: '/albums', headers: { authorization: `Bearer ${token}` } });
+    const albums = (listA.json() as { albums: Array<{ id: number; fileCount: number }> }).albums;
+    expect(albums.find((x) => x.id === album.id)?.fileCount).toBe(2);
+
+    // keluarkan satu file
+    const rm = await app.inject({ method: 'DELETE', url: `/albums/${album.id}/files/${b.file.id}`, headers: { authorization: `Bearer ${token}` } });
+    expect(rm.statusCode).toBe(200);
+
+    // hapus album
+    const del = await app.inject({ method: 'DELETE', url: `/albums/${album.id}`, headers: { authorization: `Bearer ${token}` } });
+    expect(del.statusCode).toBe(200);
+
+    // file ASLI masih ada di gudang (hapus album ≠ hapus file)
+    const manifest = await app.inject({ method: 'GET', url: '/files', headers: { authorization: `Bearer ${token}` } });
+    const all = (manifest.json() as { files: Array<{ id: number }> }).files;
+    expect(all.find((f) => f.id === a.file.id)).toBeTruthy();
+    expect(all.find((f) => f.id === b.file.id)).toBeTruthy();
+  });
+
+  it('validasi & 404: nama kosong → 422; album tak ada → 404; fileId tak dikenal diabaikan; tanpa auth → 401', async () => {
+    const token = await login();
+    const noName = await app.inject({ method: 'POST', url: '/albums', headers: { authorization: `Bearer ${token}` }, payload: { name: '   ' } });
+    expect(noName.statusCode).toBe(422);
+
+    const missing = await app.inject({ method: 'GET', url: '/albums/9999', headers: { authorization: `Bearer ${token}` } });
+    expect(missing.statusCode).toBe(404);
+    const missingFiles = await app.inject({ method: 'GET', url: '/albums/9999/files', headers: { authorization: `Bearer ${token}` } });
+    expect(missingFiles.statusCode).toBe(404);
+
+    // album valid, tapi file id tak ada → added 0 (difilter)
+    const created = await app.inject({ method: 'POST', url: '/albums', headers: { authorization: `Bearer ${token}` }, payload: { name: 'X' } });
+    const { album } = created.json() as { album: { id: number } };
+    const add = await app.inject({ method: 'POST', url: `/albums/${album.id}/files`, headers: { authorization: `Bearer ${token}` }, payload: { fileIds: [99998, 99999] } });
+    expect(add.statusCode).toBe(200);
+    expect((add.json() as { added: number }).added).toBe(0);
+
+    const rmMissing = await app.inject({ method: 'DELETE', url: `/albums/${album.id}/files/99999`, headers: { authorization: `Bearer ${token}` } });
+    expect(rmMissing.statusCode).toBe(404);
+
+    const noAuth = await app.inject({ method: 'GET', url: '/albums' });
+    expect(noAuth.statusCode).toBe(401);
+  });
+});
