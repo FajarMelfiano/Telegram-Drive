@@ -17,6 +17,7 @@ import {
   getDriveGroup, saveDriveGroup, clearDriveGroup, resetCategoryTopics,
   upsertDevice, listDevices, deleteDevice, saveRefreshToken, findRefreshToken,
   revokeRefreshToken, revokeAllTokensForDevice,
+  savePairingCode, getPairingCode, claimPairingCode, cleanupExpiredPairing,
 } from './db.js';
 import { encrypt, decrypt } from './crypto.js';
 import { mapTelegramError, type TelegramFactory, type TelegramGateway, createRealGateway } from './telegram.js';
@@ -324,6 +325,51 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     revokeAllTokensForDevice(db, id);
     deleteDevice(db, id);
     return { ok: true };
+  });
+
+  // ---- routes: pairing (login web dengan scan QR dari HP yang sudah masuk) ----
+  // Rate-limit sederhana in-memory: 5 kode/menit per proses (personal-use).
+  const pairingWindow: number[] = [];
+  const PAIRING_TTL_MS = 5 * 60 * 1000;
+  const PAIRING_RATE = 5;
+  const PAIRING_WINDOW_MS = 60_000;
+
+  /** Buat kode pairing (dipanggil HP yang sudah login; kode ini yang digambar jadi QR). */
+  app.post('/auth/pairing', { preHandler: requireAuth }, async (req, reply) => {
+    const now = Date.now();
+    while (pairingWindow.length && now - pairingWindow[0]! > PAIRING_WINDOW_MS) pairingWindow.shift();
+    if (pairingWindow.length >= PAIRING_RATE) return reply.code(429).send({ error: 'RATE_LIMITED' });
+    pairingWindow.push(now);
+    cleanupExpiredPairing(db);
+    const code = randomBytes(5).toString('hex'); // 10 hex char → cukup unik & pendek untuk QR
+    const expiresAt = new Date(now + PAIRING_TTL_MS).toISOString();
+    const label = (req.body as { deviceLabel?: string } | undefined)?.deviceLabel ?? 'Web';
+    savePairingCode(db, code, expiresAt, label);
+    return { code, expiresIn: Math.floor(PAIRING_TTL_MS / 1000) };
+  });
+
+  /** Poll status dari web: pending → claimed (lalu ambil token sekali di /claim). */
+  app.get('/auth/pairing/:code', async (req, reply) => {
+    const { code } = z.object({ code: z.string().min(4).max(32) }).parse(req.params);
+    const row = getPairingCode(db, code);
+    if (!row) return reply.code(404).send({ error: 'PAIRING_NOT_FOUND' });
+    if (new Date(row.expiresAt).getTime() < Date.now()) return reply.code(410).send({ error: 'PAIRING_EXPIRED' });
+    return { status: row.claimedAt ? 'claimed' : 'pending' };
+  });
+
+  /** Tukar kode pairing → token (single-use atomik). Menyetel cookie refresh httpOnly. */
+  app.post('/auth/pairing/:code/claim', async (req, reply) => {
+    const { code } = z.object({ code: z.string().min(4).max(32) }).parse(req.params);
+    const row = getPairingCode(db, code);
+    if (!row) return reply.code(404).send({ error: 'PAIRING_NOT_FOUND' });
+    if (new Date(row.expiresAt).getTime() < Date.now()) return reply.code(410).send({ error: 'PAIRING_EXPIRED' });
+    // Klaim atomik: hanya pemenang pertama yang lolos (single-use).
+    if (!claimPairingCode(db, code)) return reply.code(410).send({ error: 'PAIRING_CONSUMED' });
+    const ua = req.headers['user-agent'] ?? null;
+    const device = upsertDevice(db, row.deviceLabel ?? 'Web', ua);
+    const { accessToken, refreshToken } = await issueTokens(device.id);
+    setRefreshCookie(reply, refreshToken, isSecure(req));
+    return { token: accessToken, refreshToken };
   });
 
   app.get('/me', { preHandler: requireAuth }, async (req, reply) => {
