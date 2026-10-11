@@ -155,9 +155,21 @@ const styles = StyleSheet.create({
   input: { flex: 1, color: color.textPrimary, fontFamily: font.mono, fontSize: fontSize.base, paddingVertical: space(3) },
   goBtn: { paddingHorizontal: space(3), paddingVertical: space(2), borderRadius: radius.control, backgroundColor: color.amberDim },
   goText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber, letterSpacing: 1 },
-  chips: { gap: space(2), padding: space(4), paddingBottom: space(2) },
-  chip: { borderWidth: 1, borderColor: color.amberDim, borderRadius: radius.chip, paddingHorizontal: space(2.5), paddingVertical: space(1) },
-  chipText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber, letterSpacing: 0.5 },
+  chips: {
+    gap: space(2), padding: space(4), paddingBottom: space(2),
+    // ScrollView horizontal di web punya alignItems 'stretch' default → chip
+    // ikut memanjang setinggi container jadi pil raksasa. Kunci ke atas.
+    alignItems: 'flex-start',
+  },
+  chip: {
+    borderWidth: 1, borderColor: color.amberDim, borderRadius: radius.chip,
+    paddingHorizontal: space(2.5), paddingVertical: space(1),
+    backgroundColor: color.surface, // alas solid turunkan kontras tepi → fringe minim
+  },
+  chipText: {
+    fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber,
+    letterSpacing: 0.3, fontWeight: '500', // glyph lebih berat & rapat = tepi lebih bersih
+  },
   error: { color: color.red, fontSize: fontSize.sm, paddingHorizontal: space(4) },
   results: { flex: 1, marginTop: space(2) },
   center: { alignItems: 'center', padding: space(8), gap: space(3) },
