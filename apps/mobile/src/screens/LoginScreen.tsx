@@ -18,7 +18,7 @@ const ERROR_TEXT: Record<string, string> = {
 };
 
 /** Layar masuk: API ID/Hash → nomor → OTP → (opsional) password 2FA. */
-export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string) => void }) {
+export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string, refreshToken?: string) => void }) {
   const [step, setStep] = useState<Step>('api');
   const [apiId, setApiId] = useState('');
   const [apiHash, setApiHash] = useState('');
@@ -49,7 +49,7 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string) => voi
     try {
       const res = await Api.verify(requestId, code.trim(), null);
       if (res.status === 'password_required') { setStep('password'); return; }
-      if (res.token) onLoggedIn(res.token);
+      if (res.token) onLoggedIn(res.token, res.refreshToken);
     } catch (err) { showError(err); } finally { setBusy(false); }
   };
 
@@ -58,7 +58,7 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string) => voi
     setBusy(true); setError(null);
     try {
       const res = await Api.password(requestId, password, null);
-      onLoggedIn(res.token);
+      onLoggedIn(res.token, res.refreshToken);
     } catch (err) { showError(err); } finally { setBusy(false); }
   };
 

@@ -10,8 +10,8 @@ export default function LoginRoute() {
 
   return (
     <LoginScreen
-      onLoggedIn={(token) => {
-        void signIn(token).then(() => router.replace('/'));
+      onLoggedIn={(token, refreshToken) => {
+        void signIn(token, refreshToken).then(() => router.replace('/'));
       }}
     />
   );

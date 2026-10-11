@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Api, ApiError, clearToken, getToken, setToken } from './api';
+import { Api, ApiError, clearToken, getToken, setToken, setRefreshToken } from './api';
 
 type Status = 'loading' | 'signedOut' | 'signedIn';
 
@@ -8,7 +8,7 @@ interface AuthContextValue {
   token: string | null;
   /** Nama tampilan dari Telegram (firstName). */
   me: string;
-  signIn: (token: string) => Promise<void>;
+  signIn: (token: string, refreshToken?: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -46,8 +46,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => { cancelled = true; };
   }, []);
 
-  const signIn = useCallback(async (next: string) => {
+  const signIn = useCallback(async (next: string, refreshToken?: string) => {
     await setToken(next);
+    if (refreshToken) await setRefreshToken(refreshToken);
     const res = await Api.me(next);
     setTokenState(next);
     setMe(res.me.firstName);
