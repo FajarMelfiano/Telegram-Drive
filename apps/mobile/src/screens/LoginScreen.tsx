@@ -4,9 +4,11 @@ import {
   ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { Api, ApiError } from '../api';
+import { PairQrPanel } from '../components/PairQrPanel';
 import { color, font, fontSize, radius, space } from '../theme';
 
 type Step = 'api' | 'phone' | 'otp' | 'password';
+type Mode = 'form' | 'qr';
 
 const ERROR_TEXT: Record<string, string> = {
   PHONE_NUMBER_INVALID: 'Nomor tidak dikenal Telegram. Pakai format +62…',
@@ -19,6 +21,7 @@ const ERROR_TEXT: Record<string, string> = {
 
 /** Layar masuk: API ID/Hash → nomor → OTP → (opsional) password 2FA. */
 export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string, refreshToken?: string) => void }) {
+  const [mode, setMode] = useState<Mode>(Platform.OS === 'web' ? 'form' : 'form');
   const [step, setStep] = useState<Step>('api');
   const [apiId, setApiId] = useState('');
   const [apiHash, setApiHash] = useState('');
@@ -72,6 +75,9 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string, refres
           <Text style={styles.sub}>GUDANG PRIBADI · MANIFEST OTOMATIS</Text>
         </View>
 
+        {Platform.OS === 'web' && mode === 'qr' ? (
+          <PairQrPanel onLoggedIn={onLoggedIn} onBack={() => setMode('form')} />
+        ) : (
         <View style={styles.panel}>
           <Text style={styles.stepLabel}>LANGKAH {stepNo} · {step === 'api' ? 'KREDENSIAL API' : step === 'phone' ? 'NOMOR TELEPON' : step === 'otp' ? 'KODE OTP' : 'PASSWORD 2FA'}</Text>
 
@@ -118,7 +124,14 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string, refres
           )}
 
           {error && <Text style={styles.error}>{error}</Text>}
+
+          {Platform.OS === 'web' && step === 'api' && (
+            <Pressable onPress={() => setMode('qr')} style={({ pressed }) => [styles.ghost, pressed && { opacity: 0.6 }]}>
+              <Text style={styles.ghostText}>PASANGKAN DENGAN HP (QR)</Text>
+            </Pressable>
+          )}
         </View>
+        )}
 
         <Text style={styles.foot}>
           Sesi Telegram disimpan terenkripsi di servermu sendiri.{'\n'}API ID/Hash hanya dipakai untuk masuk ke akunmu.
