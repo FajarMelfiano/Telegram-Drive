@@ -13,12 +13,22 @@ export interface FileRow {
   size: number; categoryId: number; categoryKey: string;
   channelId: number | null; messageId: number | null;
   uploadedAt: string; state: FileState;
+  /** Nama tampilan (hasil rename); null = pakai name asli. */
+  displayName: string | null;
+  /** Tag manual, JSON array string (mis. ["urgent","q3"]). */
+  tags: string[];
+  /** Asal file: telegram (upload/manual) | whatsapp (direct chat). */
+  source: string;
+  chatJid: string | null;
+  waMsgId: string | null;
 }
 
 export interface InsertFileInput {
   fileUid: string; name: string; ext: string | null; mime: string | null;
   size: number; uploadedAt: string;
   categoryId: number; channelId: number | null; messageId: number | null;
+  displayName?: string | null; tags?: string[];
+  source?: string; chatJid?: string | null; waMsgId?: string | null;
 }
 
 const SCHEMA = `
@@ -64,19 +74,29 @@ CREATE TABLE IF NOT EXISTS files (
   message_id INTEGER,
   uploaded_at TEXT NOT NULL,
   state TEXT NOT NULL DEFAULT 'indexed',
+  display_name TEXT,
+  tags TEXT NOT NULL DEFAULT '[]',
+  source TEXT NOT NULL DEFAULT 'telegram',
+  chat_jid TEXT,
+  wa_msg_id TEXT,
   UNIQUE (channel_id, message_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_category ON files(category_id);
 CREATE INDEX IF NOT EXISTS idx_files_uploaded ON files(uploaded_at);
+CREATE INDEX IF NOT EXISTS idx_files_source ON files(source);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(name, content='files', content_rowid='id');
+CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(name, display_name, tags, content='files', content_rowid='id');
 
 CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
-  INSERT INTO files_fts(rowid, name) VALUES (new.id, new.name);
+  INSERT INTO files_fts(rowid, name, display_name, tags) VALUES (new.id, new.name, new.display_name, new.tags);
 END;
 CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
-  INSERT INTO files_fts(files_fts, rowid, name) VALUES ('delete', old.id, old.name);
+  INSERT INTO files_fts(files_fts, rowid, name, display_name, tags) VALUES ('delete', old.id, old.name, old.display_name, old.tags);
+END;
+CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
+  INSERT INTO files_fts(files_fts, rowid, name, display_name, tags) VALUES ('delete', old.id, old.name, old.display_name, old.tags);
+  INSERT INTO files_fts(rowid, name, display_name, tags) VALUES (new.id, new.name, new.display_name, new.tags);
 END;
 
 CREATE TABLE IF NOT EXISTS sync_queue (
@@ -91,24 +111,108 @@ CREATE TABLE IF NOT EXISTS drive_group (
   group_title TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS albums (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS album_files (
+  album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (album_id, file_id)
+);
+
+CREATE TABLE IF NOT EXISTS activity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  detail TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_activity_created ON activity(created_at);
+
+CREATE TABLE IF NOT EXISTS devices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT NOT NULL,
+  user_agent TEXT,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash TEXT NOT NULL UNIQUE,
+  device_id INTEGER,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pairing_codes (
+  code TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  claimed_at TEXT,
+  device_label TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kv (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 /**
  * Migrasi sekali-jalan (PRAGMA user_version).
  * v2 → era grup forum: channel-per-kategori diganti 1 grup + topik/kategori.
- *   - baris files + sync_queue lama menunjuk channel yang sudah dihapus → dibersihkan
- *   - referensi channel kategori di-reset (akan terisi ulang oleh topik)
- *   - **tg_sessions TIDAK disentuh** → user tidak perlu login ulang.
+ * v3 → drive-fitur: kolom files bertambah (display_name, tags, source, chat_jid,
+ *      wa_msg_id) + tabel albums/activity/devices/refresh_tokens/pairing_codes/kv.
+ *      **tg_sessions TIDAK disentuh** → user tidak perlu login ulang.
  */
 function migrate(db: Db): void {
   const version = db.pragma('user_version', { simple: true }) as number;
-  if (version >= 2) return;
-  const wipe = db.transaction(() => {
-    db.exec('DELETE FROM sync_queue; DELETE FROM files;');
-    db.exec(`UPDATE categories SET channel_id = NULL, channel_title = NULL, state = 'pending_channel';`);
-    db.pragma('user_version = 2');
+  if (version >= 3) return;
+  const tx = db.transaction(() => {
+    // Lepas trigger FTS lama lebih dulu: wipe (DELETE) tidak boleh menyentuh
+    // index lama yang akan dibuang — kalau tidak, perintah 'delete' dengan nilai
+    // NULL bisa membuat index korup ("disk image is malformed").
+    db.exec(`DROP TRIGGER IF EXISTS files_ai; DROP TRIGGER IF EXISTS files_ad; DROP TRIGGER IF EXISTS files_au;`);
+    if (version < 2) {
+      db.exec('DELETE FROM sync_queue; DELETE FROM files;');
+      db.exec(`UPDATE categories SET channel_id = NULL, channel_title = NULL, state = 'pending_channel';`);
+    }
+    if (version < 3) {
+      const cols = db.prepare(`PRAGMA table_info(files)`).all() as Array<{ name: string }>;
+      const have = new Set(cols.map((c) => c.name));
+      const add = (ddl: string, name: string) => { if (!have.has(name)) db.exec(ddl); };
+      add(`ALTER TABLE files ADD COLUMN display_name TEXT`, 'display_name');
+      add(`ALTER TABLE files ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`, 'tags');
+      add(`ALTER TABLE files ADD COLUMN source TEXT NOT NULL DEFAULT 'telegram'`, 'source');
+      add(`ALTER TABLE files ADD COLUMN chat_jid TEXT`, 'chat_jid');
+      add(`ALTER TABLE files ADD COLUMN wa_msg_id TEXT`, 'wa_msg_id');
+      // Bangun ulang FTS dengan kolom baru (name, display_name, tags).
+      db.exec(`DROP TABLE IF EXISTS files_fts;
+               CREATE VIRTUAL TABLE files_fts USING fts5(name, display_name, tags, content='files', content_rowid='id');
+               INSERT INTO files_fts(files_fts) VALUES('rebuild');`);
+      // Pasang kembali trigger (versi 3 kolom) supaya insert/update/delete mengindex FTS.
+      db.exec(`
+        CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
+          INSERT INTO files_fts(rowid, name, display_name, tags) VALUES (new.id, new.name, new.display_name, new.tags);
+        END;
+        CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN
+          INSERT INTO files_fts(files_fts, rowid, name, display_name, tags) VALUES ('delete', old.id, old.name, old.display_name, old.tags);
+        END;
+        CREATE TRIGGER files_au AFTER UPDATE ON files BEGIN
+          INSERT INTO files_fts(files_fts, rowid, name, display_name, tags) VALUES ('delete', old.id, old.name, old.display_name, old.tags);
+          INSERT INTO files_fts(rowid, name, display_name, tags) VALUES (new.id, new.name, new.display_name, new.tags);
+        END;`);
+    }
+    db.pragma('user_version = 3');
   });
-  wipe();
+  tx();
 }
 
 export function initDb(path: string): Db {
@@ -191,9 +295,18 @@ export function insertFile(db: Db, input: InsertFileInput): FileRow {
 
   try {
     const res = db.prepare(`
-      INSERT INTO files (file_uid, name, ext, mime, size, category_id, channel_id, message_id, uploaded_at, state)
-      VALUES (@fileUid, @name, @ext, @mime, @size, @categoryId, @channelId, @messageId, @uploadedAt, 'indexed')
-    `).run(input);
+      INSERT INTO files (file_uid, name, ext, mime, size, category_id, channel_id, message_id, uploaded_at, state,
+                         display_name, tags, source, chat_jid, wa_msg_id)
+      VALUES (@fileUid, @name, @ext, @mime, @size, @categoryId, @channelId, @messageId, @uploadedAt, 'indexed',
+              @displayName, @tags, @source, @chatJid, @waMsgId)
+    `).run({
+      ...input,
+      displayName: input.displayName ?? null,
+      tags: JSON.stringify(input.tags ?? []),
+      source: input.source ?? 'telegram',
+      chatJid: input.chatJid ?? null,
+      waMsgId: input.waMsgId ?? null,
+    });
     return getFileById(db, Number(res.lastInsertRowid))!;
   } catch (err) {
     // Race: channel+message sudah tercatat baris lain
@@ -211,15 +324,21 @@ interface RawFileRow {
   size: number; category_id: number; categoryKey: string;
   channel_id: number | null; message_id: number | null;
   uploaded_at: string; state: FileState;
+  display_name: string | null; tags: string | null;
+  source: string; chat_jid: string | null; wa_msg_id: string | null;
 }
 
 /** better-sqlite3 mengembalikan snake_case → samakan dengan tipe camelCase. */
 function mapFileRow(r: RawFileRow): FileRow {
+  let tags: string[] = [];
+  try { tags = JSON.parse(r.tags ?? '[]') as string[]; } catch { tags = []; }
   return {
     id: r.id, fileUid: r.file_uid, name: r.name, ext: r.ext, mime: r.mime, size: r.size,
     categoryId: r.category_id, categoryKey: r.categoryKey,
     channelId: r.channel_id, messageId: r.message_id,
     uploadedAt: r.uploaded_at, state: r.state,
+    displayName: r.display_name, tags,
+    source: r.source ?? 'telegram', chatJid: r.chat_jid, waMsgId: r.wa_msg_id,
   };
 }
 
