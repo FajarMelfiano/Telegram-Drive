@@ -29,6 +29,8 @@ export interface InsertFileInput {
   categoryId: number; channelId: number | null; messageId: number | null;
   displayName?: string | null; tags?: string[];
   source?: string; chatJid?: string | null; waMsgId?: string | null;
+  /** Kunci idempoten dari client (uuid per unggah) — unggah ulang id sama tak menggandakan. */
+  clientUploadId?: string | null;
 }
 
 const SCHEMA = `
@@ -79,12 +81,16 @@ CREATE TABLE IF NOT EXISTS files (
   source TEXT NOT NULL DEFAULT 'telegram',
   chat_jid TEXT,
   wa_msg_id TEXT,
+  client_upload_id TEXT,
   UNIQUE (channel_id, message_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_category ON files(category_id);
 CREATE INDEX IF NOT EXISTS idx_files_uploaded ON files(uploaded_at);
 CREATE INDEX IF NOT EXISTS idx_files_source ON files(source);
+-- Idempoten: unggah ulang dengan client_upload_id sama tidak menggandakan file.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_files_client_upload
+  ON files(client_upload_id) WHERE client_upload_id IS NOT NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(name, display_name, tags, content='files', content_rowid='id');
 
@@ -174,7 +180,7 @@ CREATE TABLE IF NOT EXISTS kv (
  */
 function migrate(db: Db): void {
   const version = db.pragma('user_version', { simple: true }) as number;
-  if (version >= 4) return;
+  if (version >= 5) return;
   const tx = db.transaction(() => {
     // Lepas trigger FTS lama lebih dulu: wipe (DELETE) tidak boleh menyentuh
     // index lama yang akan dibuang — kalau tidak, perintah 'delete' dengan nilai
@@ -231,7 +237,17 @@ function migrate(db: Db): void {
         db.exec('ALTER TABLE pairing_codes ADD COLUMN redeemed_at TEXT');
       }
     }
-    db.pragma('user_version = 4');
+    if (version < 5) {
+      // v5 → idempoten unggah: client_upload_id dibuat client saat enqueue;
+      // unggah ulang dengan id sama mengembalikan file lama (bukan duplikat).
+      const cols = db.prepare(`PRAGMA table_info(files)`).all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'client_upload_id')) {
+        db.exec('ALTER TABLE files ADD COLUMN client_upload_id TEXT');
+      }
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_files_client_upload
+                 ON files(client_upload_id) WHERE client_upload_id IS NOT NULL;`);
+    }
+    db.pragma('user_version = 5');
   });
   tx();
 }
@@ -317,9 +333,9 @@ export function insertFile(db: Db, input: InsertFileInput): FileRow {
   try {
     const res = db.prepare(`
       INSERT INTO files (file_uid, name, ext, mime, size, category_id, channel_id, message_id, uploaded_at, state,
-                         display_name, tags, source, chat_jid, wa_msg_id)
+                         display_name, tags, source, chat_jid, wa_msg_id, client_upload_id)
       VALUES (@fileUid, @name, @ext, @mime, @size, @categoryId, @channelId, @messageId, @uploadedAt, 'indexed',
-              @displayName, @tags, @source, @chatJid, @waMsgId)
+              @displayName, @tags, @source, @chatJid, @waMsgId, @clientUploadId)
     `).run({
       ...input,
       displayName: input.displayName ?? null,
@@ -327,6 +343,7 @@ export function insertFile(db: Db, input: InsertFileInput): FileRow {
       source: input.source ?? 'telegram',
       chatJid: input.chatJid ?? null,
       waMsgId: input.waMsgId ?? null,
+      clientUploadId: input.clientUploadId ?? null,
     });
     return getFileById(db, Number(res.lastInsertRowid))!;
   } catch (err) {
@@ -367,6 +384,15 @@ export function getFileById(db: Db, id: number): FileRow | undefined {
   const row = db.prepare(`
     SELECT f.*, c.key AS categoryKey FROM files f JOIN categories c ON c.id = f.category_id WHERE f.id = ?
   `).get(id) as RawFileRow | undefined;
+  return row ? mapFileRow(row) : undefined;
+}
+
+/** Cari file lewat kunci idempoten client (dedup unggah ulang). */
+export function getFileByClientUploadId(db: Db, clientUploadId: string): FileRow | undefined {
+  const row = db.prepare(`
+    SELECT f.*, c.key AS categoryKey FROM files f JOIN categories c ON c.id = f.category_id
+    WHERE f.client_upload_id = ?
+  `).get(clientUploadId) as RawFileRow | undefined;
   return row ? mapFileRow(row) : undefined;
 }
 

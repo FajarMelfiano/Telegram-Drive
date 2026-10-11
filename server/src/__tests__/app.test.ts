@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../app.js';
@@ -972,5 +973,56 @@ describe('album (koleksi manual)', () => {
 
     const noAuth = await app.inject({ method: 'GET', url: '/albums' });
     expect(noAuth.statusCode).toBe(401);
+  });
+});
+
+describe('dedup unggah (clientUploadId idempoten)', () => {
+  function uploadWithId(token: string, clientUploadId: string, filename = 'dup.pdf') {
+    const mp = multipart(filename, 'application/pdf', 'isi-dup');
+    return app.inject({
+      method: 'POST', url: `/files?clientUploadId=${encodeURIComponent(clientUploadId)}`,
+      headers: { authorization: `Bearer ${token}`, ...mp.headers },
+      payload: mp.payload,
+    });
+  }
+
+  it('unggah ulang id sama mengembalikan file yang sama, TANPA duplikat', async () => {
+    const token = await login();
+    const id = randomUUID();
+
+    const first = await uploadWithId(token, id);
+    expect(first.statusCode).toBe(200);
+    const f1 = (first.json() as { file: { id: number } }).file;
+
+    const second = await uploadWithId(token, id);
+    expect(second.statusCode).toBe(200);
+    const body2 = second.json() as { file: { id: number }; deduped?: boolean };
+    expect(body2.file.id).toBe(f1.id);              // id sama → file sama
+    expect(body2.deduped).toBe(true);
+
+    // Hanya satu baris di DB (tak menggandakan)
+    const list = await app.inject({ method: 'GET', url: '/files', headers: { authorization: `Bearer ${token}` } });
+    const files = (list.json() as { files: Array<{ name: string }> }).files;
+    expect(files.filter((f) => f.name === 'dup.pdf')).toHaveLength(1);
+  });
+
+  it('clientUploadId berbeda → file terpisah (bukan dedup)', async () => {
+    const token = await login();
+    const a = await uploadWithId(token, randomUUID(), 'a.pdf');
+    const b = await uploadWithId(token, randomUUID(), 'b.pdf');
+    expect((a.json() as { file: { id: number } }).file.id)
+      .not.toBe((b.json() as { file: { id: number } }).file.id);
+  });
+
+  it('tanpa clientUploadId tetap mengunggah (kompatibel mundur)', async () => {
+    const token = await login();
+    const mp = multipart('bebas.pdf', 'application/pdf', 'isi');
+    const res = await app.inject({
+      method: 'POST', url: '/files',
+      headers: { authorization: `Bearer ${token}`, ...mp.headers },
+      payload: mp.payload,
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { deduped?: boolean }).deduped).toBeUndefined();
   });
 });

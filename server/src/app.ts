@@ -12,7 +12,7 @@ import { z } from 'zod';
 import { parseQuery, classifyFile, CATEGORY_LABELS, type FileCategory } from '@td/shared';
 import {
   initDb, ensureCategories, listCategories, getCategoryByKey, upsertCategoryTopic,
-  insertFile, searchFiles, listFiles, enqueueSync, getSyncStats, getFileById,
+  insertFile, searchFiles, listFiles, enqueueSync, getSyncStats, getFileById, getFileByClientUploadId,
   saveSession, getSession, deleteSession,
   getDriveGroup, saveDriveGroup, clearDriveGroup, resetCategoryTopics,
   upsertDevice, listDevices, deleteDevice, saveRefreshToken, findRefreshToken,
@@ -489,6 +489,15 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     if (!gateway) return reply.code(401).send({ error: 'NOT_LOGGED_IN' });
     if (!req.isMultipart()) return reply.code(400).send({ error: 'EXPECT_MULTIPART' });
 
+    // Kunci idempoten client (opsional) — unggah ulang dengan id sama tidak
+    // menggandakan file (retry setelah response hilang tidak menduplikasi).
+    const { clientUploadId } = z.object({ clientUploadId: z.string().min(8).max(64).optional() })
+      .parse(req.query ?? {});
+    if (clientUploadId) {
+      const dup = getFileByClientUploadId(db, clientUploadId);
+      if (dup) return { file: dup, deduped: true };
+    }
+
     const part = await req.file();
     if (!part) return reply.code(400).send({ error: 'NO_FILE' });
 
@@ -510,6 +519,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
         fileUid: randomUUID(), name, ext, mime: part.mimetype ?? null, size,
         uploadedAt: new Date().toISOString(), categoryId: cat.id,
         channelId: sent.groupId, messageId: sent.messageId,
+        clientUploadId: clientUploadId ?? null,
       });
       enqueueSync(db, file.id);
       recordActivity('file.uploaded', { id: file.id, name: file.name, categoryKey: file.categoryKey, size: file.size });
