@@ -3,8 +3,44 @@ import { writeFile } from 'node:fs/promises';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../app.js';
 import type { TelegramGateway, DriveGroupInfo, TopicInfo, MeInfo, SentFileResult } from '../telegram.js';
+import type { WaGateway, WaMessageFile, WaStatus } from '../whatsapp.js';
 
 const KEY = '1'.repeat(64);
+
+/** Fake gateway WhatsApp: kontrol penuh tanpa jaringan (state + injeksi file). */
+class FakeWaGateway implements WaGateway {
+  state: WaStatus['state'] = 'disconnected';
+  qr: string | null = null;
+  phone: string | null = null;
+  lastError: string | null = null;
+  connectCalls = 0;
+  disconnectCalls = 0;
+  private fileHandlers: Array<(f: WaMessageFile) => void> = [];
+  private statusHandlers: Array<(s: WaStatus) => void> = [];
+
+  async connect(): Promise<void> {
+    this.connectCalls++;
+    this.state = this.qr ? 'qr_ready' : 'linked';
+    this.phone = this.state === 'linked' ? '628111' : null;
+    this.emit();
+  }
+  async disconnect(): Promise<void> {
+    this.disconnectCalls++;
+    this.state = 'disconnected'; this.qr = null; this.phone = null;
+    this.emit();
+  }
+  status(): WaStatus {
+    return { state: this.state, qr: this.qr, phone: this.phone, lastError: this.lastError };
+  }
+  getQr(): string | null { return this.state === 'qr_ready' ? this.qr : null; }
+  onFile(h: (f: WaMessageFile) => void): void { this.fileHandlers.push(h); }
+  onStatus(h: (s: WaStatus) => void): void { this.statusHandlers.push(h); }
+  destroy(): void { this.fileHandlers = []; this.statusHandlers = []; }
+
+  /** Suntikkan seolah-olah satu file tiba dari direct chat WA. */
+  emitFile(f: WaMessageFile): void { for (const h of this.fileHandlers) h(f); }
+  private emit(): void { const s = this.status(); for (const h of this.statusHandlers) h(s); }
+}
 
 class FakeGateway implements TelegramGateway {
   group: DriveGroupInfo | null = null;
@@ -71,11 +107,15 @@ function multipart(filename: string, contentType: string, content: string) {
 let app: FastifyInstance;
 let fake: FakeGateway;
 
+let fakeWa: FakeWaGateway;
+
 beforeEach(async () => {
   fake = new FakeGateway(1, 'hash-abc');
+  fakeWa = new FakeWaGateway();
   app = buildApp({
     config: { TURNO_SECRET_KEY: KEY, MAX_FILE_BYTES: 10_000_000 },
     gatewayFactory: async (id, hash, session) => { fake.apiId = id; fake.apiHash = hash; fake.session = session; return fake; },
+    waGatewayFactory: () => fakeWa,
   });
   await app.ready();
 });
@@ -721,5 +761,117 @@ describe('categories', () => {
     const res = await app.inject({ method: 'GET', url: '/categories', headers: { authorization: `Bearer ${token}` } });
     const { categories } = res.json() as { categories: Array<{ key: string; fileCount: number }> };
     expect(categories).toHaveLength(6);
+  });
+});
+
+describe('integrasi WhatsApp', () => {
+  it('/wa/status awal disconnected; butuh auth (401 tanpa token)', async () => {
+    const noAuth = await app.inject({ method: 'GET', url: '/wa/status' });
+    expect(noAuth.statusCode).toBe(401);
+    const token = await login();
+    const res = await app.inject({ method: 'GET', url: '/wa/status', headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { state: string }).state).toBe('disconnected');
+  });
+
+  it('/wa/connect memanggil gateway lalu /wa/disconnect mengembalikan disconnected', async () => {
+    const token = await login();
+    const conn = await app.inject({ method: 'POST', url: '/wa/connect', headers: { authorization: `Bearer ${token}` } });
+    expect(conn.statusCode).toBe(200);
+    expect(fakeWa.connectCalls).toBe(1);
+    expect((conn.json() as { state: string }).state).toBe('linked');
+
+    // idempoten: panggil lagi tidak error
+    await app.inject({ method: 'POST', url: '/wa/connect', headers: { authorization: `Bearer ${token}` } });
+    expect(fakeWa.connectCalls).toBe(2);
+
+    const dis = await app.inject({ method: 'POST', url: '/wa/disconnect', headers: { authorization: `Bearer ${token}` } });
+    expect(dis.statusCode).toBe(200);
+    expect(fakeWa.disconnectCalls).toBe(1);
+    expect((dis.json() as { state: string }).state).toBe('disconnected');
+  });
+
+  it('file dari direct chat WA → terkirim ke topik kategori sesuai mime & tercatat source=whatsapp', async () => {
+    const token = await login();
+    // pastikan gateway Telegram sudah login (agar handleWaFile punya cachedGateway)
+    await login();
+    fakeWa.emitFile({
+      chatJid: '628123@s.whatsapp.net', msgId: 'WA-1',
+      name: 'faktur.pdf', mime: 'application/pdf', size: 4,
+      data: Buffer.from('fakt'), timestamp: 1790000000,
+    });
+    // beri waktu handler async selesai
+    await new Promise((r) => setTimeout(r, 150));
+
+    const list = await app.inject({ method: 'GET', url: '/files', headers: { authorization: `Bearer ${token}` } });
+    const files = (list.json() as { files: Array<{ name: string; source: string; categoryKey: string; chatJid: string | null }> }).files;
+    const row = files.find((f) => f.name === 'faktur.pdf');
+    expect(row).toBeTruthy();
+    expect(row?.source).toBe('whatsapp');
+    expect(row?.categoryKey).toBe('dokumen');
+    expect(row?.chatJid).toBe('628123@s.whatsapp.net');
+    // terkirim juga ke gateway Telegram (topik dokumen)
+    expect(fake.sent.some((s) => s.caption === 'faktur.pdf')).toBe(true);
+  });
+
+  it('dedup: msgId sama dari chat sama hanya diproses sekali', async () => {
+    const token = await login();
+    const mk = (): WaMessageFile => ({
+      chatJid: '628999@s.whatsapp.net', msgId: 'DUP-1',
+      name: 'duplikat.jpg', mime: 'image/jpeg', size: 3,
+      data: Buffer.from('img'), timestamp: 1790000000,
+    });
+    fakeWa.emitFile(mk());
+    await new Promise((r) => setTimeout(r, 150));
+    fakeWa.emitFile(mk()); // upsert ulang dari Baileys
+    await new Promise((r) => setTimeout(r, 150));
+
+    const list = await app.inject({ method: 'GET', url: '/files', headers: { authorization: `Bearer ${token}` } });
+    const hits = (list.json() as { files: Array<{ name: string }> }).files.filter((f) => f.name === 'duplikat.jpg');
+    expect(hits).toHaveLength(1);
+  });
+
+  it('file terlalu besar → dilewati dengan activity wa.skipped', async () => {
+    const token = await login();
+    fakeWa.emitFile({
+      chatJid: '628777@s.whatsapp.net', msgId: 'BIG-1',
+      name: 'gede.zip', mime: 'application/zip', size: 999_999_999,
+      data: Buffer.alloc(10), timestamp: 1790000000,
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    const list = await app.inject({ method: 'GET', url: '/files', headers: { authorization: `Bearer ${token}` } });
+    expect((list.json() as { files: Array<{ name: string }> }).files.find((f) => f.name === 'gede.zip')).toBeUndefined();
+
+    const act = await app.inject({ method: 'GET', url: '/activity', headers: { authorization: `Bearer ${token}` } });
+    const types = (act.json() as { activity: Array<{ type: string }> }).activity.map((a) => a.type);
+    expect(types).toContain('wa.skipped');
+  });
+
+  it('belum login Telegram → file WA dilewati (NOT_LOGGED_IN), tak crash', async () => {
+    // tanpa login Telegram dulu: cachedGateway null
+    fakeWa.emitFile({
+      chatJid: '628555@s.whatsapp.net', msgId: 'NL-1',
+      name: 'tanpa-login.pdf', mime: 'application/pdf', size: 3,
+      data: Buffer.from('abc'), timestamp: 1790000000,
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    const token = await login();
+    const act = await app.inject({ method: 'GET', url: '/activity', headers: { authorization: `Bearer ${token}` } });
+    const skipped = (act.json() as { activity: Array<{ type: string; detail: { reason?: string } }> }).activity
+      .find((a) => a.type === 'wa.skipped');
+    expect(skipped?.detail.reason).toBe('NOT_LOGGED_IN');
+  });
+
+  it('file WA muncul di pencarian (FTS) dengan sumber whatsapp', async () => {
+    const token = await login();
+    fakeWa.emitFile({
+      chatJid: '628444@s.whatsapp.net', msgId: 'S-1',
+      name: 'kwitansi-warung.pdf', mime: 'application/pdf', size: 3,
+      data: Buffer.from('kwi'), timestamp: 1790000000,
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    const res = await app.inject({ method: 'GET', url: '/search?q=kwitansi', headers: { authorization: `Bearer ${token}` } });
+    const results = (res.json() as { results: Array<{ name: string; source: string }> }).results;
+    expect(results.some((r) => r.name === 'kwitansi-warung.pdf' && r.source === 'whatsapp')).toBe(true);
   });
 });

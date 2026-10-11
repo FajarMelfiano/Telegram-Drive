@@ -48,3 +48,31 @@
       OTP → login (id 7982240358) → upload PDF+JPG → channel "Drive · Dokumen"/
       "Drive · Gambar" terbuat → manifest 2 baris → search+filter OK → xlsx 6,9 KB →
       riwayat channel membaca file=ADA; sync Sheets pending=2 (webhook belum diisi)
+
+## Phase F: Fondasi auth & data v2 (2026-10-11)
+- [ ] Task 14: DB migration v3 (files+ kolom, albums, activity, devices, refresh_tokens, pairing_codes, kv, FTS)
+- [ ] Task 15: Cookie httpOnly + refresh token + /devices
+- [ ] Task 16: QR pairing login (single-use, TTL 5m)
+
+## Phase G: Fitur drive server
+- [ ] Task 17: rename+tags+delete+preview inline
+- [ ] Task 18: batch + move kategori
+- [ ] Task 19: ZIP stream
+- [ ] Task 20: stats + activity + SSE
+
+## Phase H: WhatsApp Baileys
+- [x] Task 21: WaGateway state machine + auth terenkripsi + QR
+- [x] Task 22: direct-chat handler → klasifikasi → topik → DB
+- [x] Task 23: routes /wa/* + smoke script
+
+## Phase I: UI mobile+web
+- [ ] Task 24: LoginScreen mode QR pairing (web)
+- [ ] Task 25: SettingsScreen (akun, koneksi, WA, penyimpanan, perangkat)
+- [ ] Task 26: Manifest batch select + aksi massal + activity feed
+- [ ] Task 27: FileDrawer v2 (preview, rename, tag, pindah, hapus)
+- [ ] Task 28: AlbumScreen contact-sheet
+- [ ] Task 29: secure-store + auto-refresh interceptor + polling events
+
+## Phase J: Verifikasi & APK
+- [ ] Checkpoint KJ: typecheck+test+lint+export+Playwright e2e+curl+WA live
+- [ ] Task 30: build APK debug lokal

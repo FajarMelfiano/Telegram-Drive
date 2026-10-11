@@ -1,6 +1,6 @@
 import { randomUUID, createHash, randomBytes } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { unlink } from 'node:fs/promises';
+import { unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
@@ -20,18 +20,27 @@ import {
   savePairingCode, getPairingCode, claimPairingCode, cleanupExpiredPairing,
   updateFile, deleteFile, moveFileCategory, logActivity, listActivity, getStats,
   listAlbums, createAlbum, getAlbum, renameAlbum, deleteAlbum, addToAlbum, removeFromAlbum, listAlbumFiles,
+  kvGet, kvSet, kvDelete,
 } from './db.js';
 import { encrypt, decrypt } from './crypto.js';
 import { mapTelegramError, type TelegramFactory, type TelegramGateway, createRealGateway } from './telegram.js';
 import { buildXlsxBuffer } from './sync.js';
 import { createZipStream } from './zip.js';
 import { SseHub } from './sse.js';
+import {
+  BaileysWaGateway, EncryptedWaAuthStore, ensureWaDataDir,
+  type WaGateway, type WaMessageFile, type WaStatus,
+} from './whatsapp.js';
 import type { AppConfig } from './config.js';
 
 export interface BuildAppOptions {
   dbPath?: string;
   config: Pick<AppConfig, 'MAX_FILE_BYTES'> & { TURNO_SECRET_KEY: string };
   gatewayFactory?: TelegramFactory;
+  /** Factory gateway WhatsApp (bisa dipalsukan di test). Default: Baileys. */
+  waGatewayFactory?: (hexKey: string) => WaGateway;
+  /** Direktori data auth WhatsApp. Default: <dbPath dir>/wa. */
+  waDataDir?: string;
 }
 
 const AUTH_TTL_MS = 10 * 60 * 1000;
@@ -103,6 +112,66 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   const pending = new Map<string, PendingAuth>();
   let cachedGateway: TelegramGateway | null = null;
   const hub = new SseHub();
+
+  // ---- gateway WhatsApp (dibuat eager; connect() tetap on-demand) ----
+  // Konstruktor ringan (tak import Baileys — itu lazy saat connect), jadi aman
+  // dibuat walau fitur WA tak dipakai. Handler onFile/onStatus terpasang sejak
+  // awal supaya file yang masuk kapan pun langsung terproses.
+  const waDir = opts.waDataDir ?? join(opts.dbPath ?? '.', 'wa');
+  void ensureWaDataDir(waDir);
+  const waStore = new EncryptedWaAuthStore(join(waDir, 'auth.json'), opts.config.TURNO_SECRET_KEY);
+  const waGateway: WaGateway = opts.waGatewayFactory
+    ? opts.waGatewayFactory(opts.config.TURNO_SECRET_KEY)
+    : new BaileysWaGateway(waStore);
+  // Teruskan file yang diterima dari direct chat → topik kategori Telegram.
+  waGateway.onFile((f) => { void handleWaFile(f); });
+  waGateway.onStatus((s) => {
+    hub.broadcast('wa.status', s);
+    recordActivity('wa.status', { state: s.state, phone: s.phone });
+  });
+
+  /**
+   * Terima satu file dari chat WhatsApp → klasifikasi → kirim ke topik kategori
+   * → catat di DB (source=whatsapp). Idempoten: dedup by chatJid+msgId (kv).
+   */
+  const handleWaFile = async (f: WaMessageFile): Promise<void> => {
+    const dedupKey = `wa:${f.chatJid}:${f.msgId}`;
+    if (kvGet(db, dedupKey)) return; // sudah diproses (pesan bisa di-upsert ulang)
+    if (f.size > opts.config.MAX_FILE_BYTES) {
+      recordActivity('wa.skipped', { chatJid: f.chatJid, reason: 'TOO_LARGE', size: f.size });
+      return;
+    }
+    // Ambil gateway Telegram yang sudah login (getGateway lazy-load dari sesi tersimpan).
+    const gateway = await getGateway();
+    if (!gateway) { recordActivity('wa.skipped', { chatJid: f.chatJid, reason: 'NOT_LOGGED_IN' }); return; }
+
+    const { category } = classifyFile(f.mime, f.name);
+    const label = CATEGORY_LABELS[category as FileCategory];
+    const name = f.name || `wa-file-${f.msgId}`;
+    const dot = name.lastIndexOf('.');
+    const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : null;
+    const tempPath = join(tmpdir(), `td-wa-${randomUUID()}`);
+    try {
+      await writeFile(tempPath, f.data);
+      const sent = await sendToCategory(gateway, category, label, tempPath, name);
+      const file = insertFile(db, {
+        fileUid: `wa:${f.chatJid}:${f.msgId}`,
+        name, ext, mime: f.mime, size: f.data.length,
+        categoryId: getCategoryByKey(db, category)!.id,
+        channelId: sent.groupId, messageId: sent.messageId,
+        // timestamp WA = detik Unix → simpan sebagai ISO (konsisten dengan upload Telegram)
+        uploadedAt: new Date(f.timestamp * 1000).toISOString(),
+        source: 'whatsapp', chatJid: f.chatJid, waMsgId: f.msgId,
+      });
+      enqueueSync(db, file.id);
+      kvSet(db, dedupKey, String(file.id));
+      recordActivity('wa.file.saved', { id: file.id, name: file.name, categoryKey: file.categoryKey, chatJid: f.chatJid });
+    } catch (err) {
+      recordActivity('wa.skipped', { chatJid: f.chatJid, reason: err instanceof Error ? err.message : 'UNKNOWN' });
+    } finally {
+      await unlink(tempPath).catch(() => undefined);
+    }
+  };
 
   /** Catat aktivitas + push realtime ke semua klien SSE. */
   const recordActivity = (type: string, detail?: unknown, id?: number): void => {
@@ -710,9 +779,32 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     return reply;
   });
 
+  // ---- routes: integrasi WhatsApp (Baileys linked-device) ----
+
+  /** Status koneksi WhatsApp (state + QR bila menunggu discan + nomor tertaut). */
+  app.get('/wa/status', { preHandler: requireAuth }, async () => waGateway.status());
+
+  /**
+   * Mulai/mulai-ulang koneksi WhatsApp. Idempoten — aman dipanggil berulang.
+   * QR (kalau muncul) diambil lewat GET /wa/status atau event SSE wa.status.
+   */
+  app.post('/wa/connect', { preHandler: requireAuth }, async () => {
+    await waGateway.connect();
+    return waGateway.status();
+  });
+
+  /** Cabut koneksi + hapus auth state (user harus scan ulang untuk menyambung lagi). */
+  app.post('/wa/disconnect', { preHandler: requireAuth }, async () => {
+    await waGateway.disconnect();
+    return waGateway.status();
+  });
+
   app.get('/health', async () => ({ ok: true }));
 
-  app.addHook('onClose', async () => { hub.closeAll(); });
+  app.addHook('onClose', async () => {
+    waGateway?.destroy();
+    hub.closeAll();
+  });
 
   app.decorate('db', db);
   return app;
