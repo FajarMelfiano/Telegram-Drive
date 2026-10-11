@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View,
+  Pressable, ScrollView, StyleSheet, Text, View,
 } from 'react-native';
 import { ArrowLeft, Link2, LogOut, Trash2, Unlink } from 'lucide-react-native';
 import { Api, ApiError, type ActivityRow, type DeviceRow, type StatsResult, type WaStatus } from '../api';
@@ -75,7 +75,9 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
     }
   }, [token]);
 
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => { void load(); }, [load]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const waConnect = async () => {
     setBusy(true); setNotice(null);

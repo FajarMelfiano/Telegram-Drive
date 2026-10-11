@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Image, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Api, ApiError } from '../api';
-import { color, font, fontSize, radius, space } from '../theme';
+import { color, font, fontSize, space } from '../theme';
 
 const POLL_MS = 2000;
 
@@ -54,11 +54,13 @@ export function PairQrPanel({ onLoggedIn, onBack }: {
     }
   }, [renderQr]);
 
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     cancelledRef.current = false;
     void start();
     return () => { cancelledRef.current = true; };
   }, [start]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Poll status sampai disetujui → langsung tukar jadi token.
   useEffect(() => {

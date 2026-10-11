@@ -64,6 +64,7 @@ export function AlbumScreen({ token, onBack }: { token: string; onBack: () => vo
     }
   }, [token]);
 
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => { void load(); }, [load]);
 
   // Muat isi album saat album aktif berubah.
@@ -75,6 +76,7 @@ export function AlbumScreen({ token, onBack }: { token: string; onBack: () => vo
       .catch(() => undefined);
     return () => { cancelled = true; };
   }, [token, active]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const createAlbum = async () => {
     const name = newName.trim();

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Image, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
-import { color, font, fontSize, radius, space } from '../theme';
+import { ActivityIndicator, Image, Platform, StyleSheet, Text, View } from 'react-native';
+import { color, font, fontSize, space } from '../theme';
 
 /**
  * Menampilkan QR koneksi WhatsApp (dari string pairing Baileys) agar HP lain

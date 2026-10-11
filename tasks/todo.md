@@ -50,15 +50,15 @@
       riwayat channel membaca file=ADA; sync Sheets pending=2 (webhook belum diisi)
 
 ## Phase F: Fondasi auth & data v2 (2026-10-11)
-- [ ] Task 14: DB migration v3 (files+ kolom, albums, activity, devices, refresh_tokens, pairing_codes, kv, FTS)
-- [ ] Task 15: Cookie httpOnly + refresh token + /devices
-- [ ] Task 16: QR pairing login (single-use, TTL 5m)
+- [x] Task 14: DB migration v3→v4 (files+ kolom, albums, activity, devices, refresh_tokens, pairing_codes+redeemed_at, kv, FTS)
+- [x] Task 15: Cookie httpOnly + refresh token (rotasi, hash SHA-256, bound device) + /devices
+- [x] Task 16: QR pairing login — alur v4: web buat kode (tanpa auth), HP approve, web claim single-use
 
 ## Phase G: Fitur drive server
-- [ ] Task 17: rename+tags+delete+preview inline
-- [ ] Task 18: batch + move kategori
-- [ ] Task 19: ZIP stream
-- [ ] Task 20: stats + activity + SSE
+- [x] Task 17: rename+tags+delete+preview inline
+- [x] Task 18: batch + move kategori (insert-new-first, update channel_id/message_id)
+- [x] Task 19: ZIP stream (custom STORE, max 20, skip gagal, UTF-8 flag)
+- [x] Task 20: stats + activity + SSE (mobile fallback polling /activity)
 
 ## Phase H: WhatsApp Baileys
 - [x] Task 21: WaGateway state machine + auth terenkripsi + QR
@@ -66,12 +66,19 @@
 - [x] Task 23: routes /wa/* + smoke script
 
 ## Phase I: UI mobile+web
-- [ ] Task 24: LoginScreen mode QR pairing (web)
-- [ ] Task 25: SettingsScreen (akun, koneksi, WA, penyimpanan, perangkat)
-- [ ] Task 26: Manifest batch select + aksi massal + activity feed
-- [ ] Task 27: FileDrawer v2 (preview, rename, tag, pindah, hapus)
-- [ ] Task 28: AlbumScreen contact-sheet
-- [ ] Task 29: secure-store + auto-refresh interceptor + polling events
+- [x] Task 24: LoginScreen mode QR pairing (web: PairQrPanel; HP: PairApproveScreen camera)
+- [x] Task 25: SettingsScreen (ledger: akun, WA+QR, penyimpanan, perangkat, aktivitas)
+- [x] Task 26: Manifest batch select + aksi massal (ZIP/pindah/hapus) + picker kategori
+- [x] Task 27: FileDrawer v2 (preview, rename, tag, pindah, hapus)
+- [x] Task 28: AlbumScreen contact-sheet
+- [x] Task 29: secure-store + auto-refresh interceptor (+ polling events via /activity)
+
+## Phase I+: Antrian unggah tahan-hilang (Layer 1+3) (2026-10-11)
+- Rujukan: `tasks/brainstorm-upload-queue.md` (arah 3 lapis dari user; Layer 2 background task DITUNDA)
+- [x] Server: dedup idempoten `clientUploadId` — migrasi v5 (files.client_upload_id + UNIQUE partial index), POST /files `?clientUploadId`, getFileByClientUploadId; +3 test (id sama→file sama; id beda→terpisah; tanpa id kompatibel mundur); 89 test hijau
+- [x] Mobile: `uploadQueue.ts` — antrian persisten (AsyncStorage metadata; web Blob di IndexedDB utk replay lintas-reload), state queued→uploading→done/failed/source_lost, crash-recovery (uploading→queued saat load), drain FIFO sequensial 1x per trigger (app open/online/pick)
+- [x] Manifest: blok "ANTRIAN LOKAL" (state pill + aksi COBA/BUANG), pickAndUpload enqueue dulu, replay on mount + listener online (web)
+- [x] Lint 0 masalah + TSC=0 (perbaikan rule set-state-in-effect + unused import di FileDrawer/PairQrPanel/WaQr/Album/Settings/Manifest)
 
 ## Phase J: Verifikasi & APK
 - [ ] Checkpoint KJ: typecheck+test+lint+export+Playwright e2e+curl+WA live

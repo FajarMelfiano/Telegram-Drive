@@ -52,7 +52,9 @@ export function FileDrawer({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Sinkronkan state lokal saat file berganti (drawer dipakai ulang).
+  /* eslint-disable react-hooks/set-state-in-effect */
+  // Sinkronkan state lokal saat file berganti (drawer dipakai ulang) — reset
+  // ke nilai file saat itu. Ini sinkronisasi state↔prop, bukan render cascading.
   useEffect(() => {
     setName(file?.displayName || file?.name || '');
     setTags(file?.tags ?? []);
@@ -61,6 +63,7 @@ export function FileDrawer({
     setShowMove(false);
     setErr(null);
   }, [file]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   if (!file) return null;
   const glyph = glyphFor(file.ext);

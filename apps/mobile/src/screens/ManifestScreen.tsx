@@ -9,6 +9,9 @@ import { Api, ApiError, downloadFile, type CategoryRow, type FileRow } from '../
 import { ManifestRow } from '../components/ManifestRow';
 import { CategoryRail } from '../components/CategoryRail';
 import { FileDrawer } from '../components/FileDrawer';
+import {
+  drainQueue, enqueueUpload, getQueue, removeUpload, retryUpload, type QueueEntry,
+} from '../uploadQueue';
 import { color, font, fontSize, radius, space } from '../theme';
 
 /**
@@ -28,10 +31,24 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [batchBusy, setBatchBusy] = useState(false);
   const [movePicker, setMovePicker] = useState(false);
+  const [queue, setQueue] = useState<QueueEntry[]>([]);
   const { width } = useWindowDimensions();
   const narrow = width < 720;
   const router = useRouter();
   const selecting = selected.size > 0;
+
+  // Segarkan state antrian dari penyimpanan (await dulu → setState setelah await).
+  const refreshQueue = async () => {
+    const q = await getQueue();
+    setQueue(q);
+  };
+
+  // Putar antrian (replay anti-hilang) → muat ulang manifest agar baris terbaru muncul.
+  const kickDrain = async () => {
+    await drainQueue(token, () => { void refreshQueue(); });
+    await load();
+    void refreshQueue();
+  };
 
   const toggleSelect = (id: number) => {
     setSelected((prev) => {
@@ -100,9 +117,19 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
     }
   }, [token, active]);
 
-  // load() selalu async (setState terjadi setelah await) — false positive rule ini.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
+  // load() selalu async (setState terjadi setelah await) — aman dari rule ini.
   useEffect(() => { void load(); }, [load]);
+
+  // Replay antrian tertunda (crash recovery / app dibuka lagi) + putar saat online.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refreshQueue();
+    void kickDrain();
+    const onOnline = () => { void kickDrain(); };
+    if (Platform.OS === 'web') globalThis.addEventListener('online', onOnline);
+    return () => { if (Platform.OS === 'web') globalThis.removeEventListener('online', onOnline); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const pickAndUpload = async () => {
     const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false });
@@ -111,9 +138,16 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
     setUploading(true);
     setNotice(null);
     try {
-      const up = await Api.upload(token, { uri: asset.uri, name: asset.name, type: asset.mimeType ?? 'application/octet-stream' });
-      setNotice(`Terkirim ke ${up.file.categoryKey.toUpperCase()} · baris #${String(up.file.id).padStart(4, '0')} tercatat`);
-      await load();
+      // Catat dulu ke antrian lokal (anti-hilang) → putar otomatis. Bila gagal
+      // nanti, entri tetap "queued" dan diputar lagi saat app dibuka / online.
+      await enqueueUpload({
+        uri: asset.uri,
+        name: asset.name,
+        type: asset.mimeType ?? 'application/octet-stream',
+        size: asset.size ?? 0,
+      });
+      setNotice(`Masuk antrian: ${asset.name}`);
+      await kickDrain();
     } catch (err) {
       setNotice(err instanceof ApiError
         ? (err.code === 'FLOOD_WAIT' ? `Telegram minta jeda ${err.retryAfterSeconds ?? '?'} detik.` : `Gagal unggah (${err.code})`)
@@ -121,6 +155,16 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
     } finally {
       setUploading(false);
     }
+  };
+
+  const cancelQueued = async (id: string) => {
+    await removeUpload(id);
+    await refreshQueue();
+  };
+  const retryQueued = async (id: string) => {
+    await retryUpload(id);
+    await refreshQueue();
+    void kickDrain();
   };
 
   const handleDownload = async (f: FileRow) => {
@@ -179,6 +223,32 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
         </View>
 
         <View style={styles.listWrap}>
+          {queue.length > 0 && (
+            <View style={styles.queueBlock}>
+              <View style={styles.queueHead}>
+                <Text style={styles.queueTitle}>ANTRIAN LOKAL</Text>
+                <Text style={styles.queueCount}>{queue.length}</Text>
+              </View>
+              {queue.map((q) => (
+                <View key={q.clientUploadId} style={styles.queueRow}>
+                  <View style={styles.queueMain}>
+                    <Text style={styles.queueName} numberOfLines={1}>{q.name}</Text>
+                    <Text style={[styles.queueState, { color: q.state === 'failed' || q.state === 'source_lost' ? color.red : q.state === 'uploading' ? color.amber : color.textMuted }]}>
+                      {q.state === 'queued' ? 'ANTRE' : q.state === 'uploading' ? 'MENGUNGGAH…' : q.state === 'failed' ? `GAGAL${q.lastError ? ` · ${q.lastError}` : ''}` : 'SUMBER HILANG'}
+                    </Text>
+                  </View>
+                  {(q.state === 'failed') && (
+                    <Pressable onPress={() => void retryQueued(q.clientUploadId)} hitSlop={8} style={({ pressed }) => [styles.queueAct, pressed && { opacity: 0.6 }]}>
+                      <Text style={styles.queueActText}>COBA</Text>
+                    </Pressable>
+                  )}
+                  <Pressable onPress={() => void cancelQueued(q.clientUploadId)} hitSlop={8} style={({ pressed }) => [styles.queueAct, pressed && { opacity: 0.6 }]}>
+                    <Text style={styles.queueActText}>BUANG</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          )}
           {loading ? (
             <View style={styles.center}><ActivityIndicator color={color.amber} /><Text style={styles.loadingText}>MEMUAT MANIFEST…</Text></View>
           ) : (
@@ -302,6 +372,24 @@ const styles = StyleSheet.create({
   railWrap: { width: 172 },
   railWrapNarrow: { width: '100%', borderBottomWidth: 1, borderBottomColor: color.hairline, paddingHorizontal: space(3) },
   listWrap: { flex: 1 },
+  queueBlock: { borderBottomWidth: 1, borderBottomColor: color.hairline, backgroundColor: color.surface },
+  queueHead: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: space(3), paddingVertical: space(2),
+    borderBottomWidth: 1, borderBottomColor: color.hairline,
+  },
+  queueTitle: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber, letterSpacing: 2 },
+  queueCount: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textMuted, letterSpacing: 1 },
+  queueRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: space(3), paddingVertical: space(2.5),
+    borderBottomWidth: 1, borderBottomColor: color.hairline, gap: space(3),
+  },
+  queueMain: { flex: 1, minWidth: 0 },
+  queueName: { color: color.textPrimary, fontSize: fontSize.sm },
+  queueState: { fontFamily: font.mono, fontSize: fontSize.xs, letterSpacing: 1, marginTop: 2 },
+  queueAct: { paddingHorizontal: space(2), paddingVertical: space(1) },
+  queueActText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.red, letterSpacing: 1 },
   center: { alignItems: 'center', padding: space(8), gap: space(3) },
   loadingText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 2 },
   emptyTitle: { fontFamily: font.mono, fontSize: fontSize.md, color: color.textMuted, letterSpacing: 2 },

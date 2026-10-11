@@ -173,9 +173,9 @@ export interface AlbumRow { id: number; name: string; createdAt: string; fileCou
 export interface ActivityRow { id: number; type: string; detail: unknown; createdAt: string }
 export interface StatsResult {
   totalFiles: number; totalBytes: number;
-  byCategory: Array<{ key: string; count: number; bytes: number }>;
-  byExt: Array<{ ext: string; count: number }>;
-  bySource: Array<{ source: string; count: number }>;
+  byCategory: { key: string; count: number; bytes: number }[];
+  byExt: { ext: string; count: number }[];
+  bySource: { source: string; count: number }[];
 }
 export interface WaStatus { state: string; qr: string | null; phone: string | null; lastError: string | null }
 
@@ -196,7 +196,7 @@ export const Api = {
   search: (token: string | null, q: string) =>
     api<{ parsed: ParsedQuery; results: FileRow[] }>(`/search?q=${encodeURIComponent(q)}`, { token }),
   syncStatus: (token: string | null) => api<{ pending: number; sent: number }>('/sync/status', { token }),
-  upload: async (token: string | null, file: { uri: string; name: string; type: string }) => {
+  upload: async (token: string | null, file: { uri: string; name: string; type: string }, clientUploadId?: string) => {
     const form = new FormData();
     if (Platform.OS === 'web') {
       // Web: uri adalah blob URL — ubah dulu jadi Blob agar ikut terkirim
@@ -206,7 +206,9 @@ export const Api = {
       // React Native: objek {uri,name,type} adalah format bawaan FormData
       form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
     }
-    return api<{ file: FileRow }>('/files', { token, formData: form });
+    // Kunci idempoten → server mengembalikan file lama bila retry (tak menggandakan)
+    const q = clientUploadId ? `?clientUploadId=${encodeURIComponent(clientUploadId)}` : '';
+    return api<{ file: FileRow; deduped?: boolean }>(`/files${q}`, { token, formData: form });
   },
 
   // ---- aksi file (drive) ----
@@ -219,7 +221,7 @@ export const Api = {
   moveFile: (token: string | null, id: number, category: string) =>
     api<{ file: FileRow }>(`/files/${id}/category`, { method: 'PATCH', body: { category }, token }),
   batch: (token: string | null, action: 'delete' | 'move' | 'tag', ids: number[], extra?: { category?: string; tags?: string[] }) =>
-    api<{ results: Array<{ id: number; ok: boolean; error?: string }> }>('/files/batch', {
+    api<{ results: { id: number; ok: boolean; error?: string }[] }>('/files/batch', {
       method: 'POST', body: { action, ids, ...extra }, token,
     }),
   zipUrl: (token: string | null, ids: number[]) =>
