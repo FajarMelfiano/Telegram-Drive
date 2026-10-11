@@ -249,22 +249,38 @@ describe('devices (manajemen sesi)', () => {
 });
 
 describe('pairing QR (login web dari HP)', () => {
-  it('alur penuh: HP buat kode → web poll pending → HP approve → web claim → dapat token + cookie', async () => {
-    const { token } = await loginFull(); // HP yang sudah login
+  it('alur penuh: web buat kode (tanpa login) → HP setujui → web poll approved → web claim → dapat token + cookie', async () => {
+    const { token: hpToken } = await loginFull(); // HP yang sudah login
 
-    // 1. HP meminta kode pairing
-    const created = await app.inject({ method: 'POST', url: '/auth/pairing', headers: { authorization: `Bearer ${token}` }, payload: { deviceLabel: 'Chrome Linux' } });
+    // 1. WEB membuat kode pairing TANPA login (kode inilah yang digambar jadi QR)
+    const created = await app.inject({ method: 'POST', url: '/auth/pairing', payload: { deviceLabel: 'Chrome Linux' } });
     expect(created.statusCode).toBe(200);
     const { code, expiresIn } = created.json() as { code: string; expiresIn: number };
     expect(code).toBeTruthy();
     expect(expiresIn).toBe(300);
 
-    // 2. Web poll → pending
-    const poll = await app.inject({ method: 'GET', url: `/auth/pairing/${code}` });
-    expect(poll.statusCode).toBe(200);
-    expect((poll.json() as { status: string }).status).toBe('pending');
+    // 2. Web poll → pending (belum disetujui)
+    const poll1 = await app.inject({ method: 'GET', url: `/auth/pairing/${code}` });
+    expect(poll1.statusCode).toBe(200);
+    expect((poll1.json() as { status: string }).status).toBe('pending');
 
-    // 3. Web klaim → token + cookie
+    // 3. Web claim SEBELUM approve → ditolak 409 (belum disetujui HP)
+    const early = await app.inject({ method: 'POST', url: `/auth/pairing/${code}/claim` });
+    expect(early.statusCode).toBe(409);
+
+    // 4. HP menyetujui kode hasil pindaian
+    const approve = await app.inject({ method: 'POST', url: `/auth/pairing/${code}/approve`, headers: { authorization: `Bearer ${hpToken}` } });
+    expect(approve.statusCode).toBe(200);
+
+    // approve kedua ditolak (single-use)
+    const approve2 = await app.inject({ method: 'POST', url: `/auth/pairing/${code}/approve`, headers: { authorization: `Bearer ${hpToken}` } });
+    expect(approve2.statusCode).toBe(410);
+
+    // 5. Web poll → approved
+    const poll2 = await app.inject({ method: 'GET', url: `/auth/pairing/${code}` });
+    expect((poll2.json() as { status: string }).status).toBe('approved');
+
+    // 6. Web tukar kode → token + cookie httpOnly
     const claim = await app.inject({ method: 'POST', url: `/auth/pairing/${code}/claim` });
     expect(claim.statusCode).toBe(200);
     const body = claim.json() as { token: string; refreshToken: string };
@@ -273,25 +289,28 @@ describe('pairing QR (login web dari HP)', () => {
     const cookies = Array.isArray(setCookie) ? setCookie : [String(setCookie ?? '')];
     expect(cookies.some((c) => c.startsWith('td_refresh=') && c.includes('HttpOnly'))).toBe(true);
 
-    // 4. token klaim valid → /me sukses
+    // 7. token klaim valid → /me sukses
     const me = await app.inject({ method: 'GET', url: '/me', headers: { authorization: `Bearer ${body.token}` } });
     expect(me.statusCode).toBe(200);
 
-    // 5. claim kedua ditolak (single-use)
+    // 8. claim kedua ditolak (single-use redeemed)
     const again = await app.inject({ method: 'POST', url: `/auth/pairing/${code}/claim` });
     expect(again.statusCode).toBe(410);
   });
 
-  it('kode tidak dikenal → 404 di poll & claim', async () => {
+  it('kode tidak dikenal → 404 di poll, approve & claim', async () => {
+    const { token } = await loginFull();
     const poll = await app.inject({ method: 'GET', url: '/auth/pairing/deadbeef' });
     expect(poll.statusCode).toBe(404);
+    const approve = await app.inject({ method: 'POST', url: '/auth/pairing/deadbeef/approve', headers: { authorization: `Bearer ${token}` } });
+    expect(approve.statusCode).toBe(404);
     const claim = await app.inject({ method: 'POST', url: '/auth/pairing/deadbeef/claim' });
     expect(claim.statusCode).toBe(404);
   });
 
-  it('kode kedaluwarsa → 410 di poll & claim', async () => {
-    const { token } = await loginFull();
-    const created = await app.inject({ method: 'POST', url: '/auth/pairing', headers: { authorization: `Bearer ${token}` }, payload: {} });
+  it('kode kedaluwarsa → 410 di poll, approve & claim', async () => {
+    await loginFull();
+    const created = await app.inject({ method: 'POST', url: '/auth/pairing', payload: {} });
     const { code } = created.json() as { code: string };
     // Paksa kedaluwarsa langsung di DB
     app.db.prepare('UPDATE pairing_codes SET expires_at = ? WHERE code = ?').run(new Date(Date.now() - 1000).toISOString(), code);
@@ -301,9 +320,13 @@ describe('pairing QR (login web dari HP)', () => {
     expect(claim.statusCode).toBe(410);
   });
 
-  it('butuh login untuk membuat kode (tanpa token → 401)', async () => {
-    const res = await app.inject({ method: 'POST', url: '/auth/pairing', payload: {} });
-    expect(res.statusCode).toBe(401);
+  it('approve butuh login HP (tanpa token → 401); membuat kode TANPA login diperbolehkan (web)', async () => {
+    // approve tanpa login → 401
+    const approveNoAuth = await app.inject({ method: 'POST', url: '/auth/pairing/abcdef/approve' });
+    expect(approveNoAuth.statusCode).toBe(401);
+    // membuat kode tanpa login → 200 (web yang belum masuk)
+    const created = await app.inject({ method: 'POST', url: '/auth/pairing', payload: {} });
+    expect(created.statusCode).toBe(200);
   });
 });
 

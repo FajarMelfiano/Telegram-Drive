@@ -17,7 +17,7 @@ import {
   getDriveGroup, saveDriveGroup, clearDriveGroup, resetCategoryTopics,
   upsertDevice, listDevices, deleteDevice, saveRefreshToken, findRefreshToken,
   revokeRefreshToken, revokeAllTokensForDevice,
-  savePairingCode, getPairingCode, claimPairingCode, cleanupExpiredPairing,
+  savePairingCode, getPairingCode, approvePairingCode, redeemPairingCode, cleanupExpiredPairing,
   updateFile, deleteFile, moveFileCategory, logActivity, listActivity, getStats,
   listAlbums, createAlbum, getAlbum, renameAlbum, deleteAlbum, addToAlbum, removeFromAlbum, listAlbumFiles,
   kvGet, kvSet, kvDelete,
@@ -414,8 +414,13 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   const PAIRING_RATE = 5;
   const PAIRING_WINDOW_MS = 60_000;
 
-  /** Buat kode pairing (dipanggil HP yang sudah login; kode ini yang digambar jadi QR). */
-  app.post('/auth/pairing', { preHandler: requireAuth }, async (req, reply) => {
+  /**
+   * [WEB, tanpa login] Buat kode pairing → digambar jadi QR di layar web.
+   * Rate-limited (5/menit) & TTL 5 menit. Token TIDAK pernah masuk QR — QR hanya
+   * membawa kode 10 hex ini; token baru diterbitkan saat web menukar kode setelah
+   * disetujui HP.
+   */
+  app.post('/auth/pairing', async (req, reply) => {
     const now = Date.now();
     while (pairingWindow.length && now - pairingWindow[0]! > PAIRING_WINDOW_MS) pairingWindow.shift();
     if (pairingWindow.length >= PAIRING_RATE) return reply.code(429).send({ error: 'RATE_LIMITED' });
@@ -428,23 +433,38 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     return { code, expiresIn: Math.floor(PAIRING_TTL_MS / 1000) };
   });
 
-  /** Poll status dari web: pending → claimed (lalu ambil token sekali di /claim). */
+  /**
+   * [HP, butuh login] Setujui kode pairing hasil pindaian QR. Menandai kode
+   * sebagai disetujui (claimed_at) — atomik, hanya HP pertama yang menang.
+   */
+  app.post('/auth/pairing/:code/approve', { preHandler: requireAuth }, async (req, reply) => {
+    const { code } = z.object({ code: z.string().min(4).max(32) }).parse(req.params);
+    const row = getPairingCode(db, code);
+    if (!row) return reply.code(404).send({ error: 'PAIRING_NOT_FOUND' });
+    if (new Date(row.expiresAt).getTime() < Date.now()) return reply.code(410).send({ error: 'PAIRING_EXPIRED' });
+    if (!approvePairingCode(db, code)) return reply.code(410).send({ error: 'PAIRING_ALREADY_APPROVED' });
+    return { ok: true };
+  });
+
+  /** [WEB] Poll status: pending → approved (lalu tukar token sekali di /claim). */
   app.get('/auth/pairing/:code', async (req, reply) => {
     const { code } = z.object({ code: z.string().min(4).max(32) }).parse(req.params);
     const row = getPairingCode(db, code);
     if (!row) return reply.code(404).send({ error: 'PAIRING_NOT_FOUND' });
     if (new Date(row.expiresAt).getTime() < Date.now()) return reply.code(410).send({ error: 'PAIRING_EXPIRED' });
-    return { status: row.claimedAt ? 'claimed' : 'pending' };
+    return { status: row.redeemedAt ? 'redeemed' : row.claimedAt ? 'approved' : 'pending' };
   });
 
-  /** Tukar kode pairing → token (single-use atomik). Menyetel cookie refresh httpOnly. */
+  /** [WEB] Tukar kode pairing → token (single-use atomik). Menyetel cookie refresh httpOnly. */
   app.post('/auth/pairing/:code/claim', async (req, reply) => {
     const { code } = z.object({ code: z.string().min(4).max(32) }).parse(req.params);
     const row = getPairingCode(db, code);
     if (!row) return reply.code(404).send({ error: 'PAIRING_NOT_FOUND' });
     if (new Date(row.expiresAt).getTime() < Date.now()) return reply.code(410).send({ error: 'PAIRING_EXPIRED' });
-    // Klaim atomik: hanya pemenang pertama yang lolos (single-use).
-    if (!claimPairingCode(db, code)) return reply.code(410).send({ error: 'PAIRING_CONSUMED' });
+    // Belum disetujui HP → belum boleh ditukar.
+    if (!row.claimedAt) return reply.code(409).send({ error: 'PAIRING_NOT_APPROVED' });
+    // Tukar atomik: hanya pemenang pertama yang lolos (single-use).
+    if (!redeemPairingCode(db, code)) return reply.code(410).send({ error: 'PAIRING_CONSUMED' });
     const ua = req.headers['user-agent'] ?? null;
     const device = upsertDevice(db, row.deviceLabel ?? 'Web', ua);
     const { accessToken, refreshToken } = await issueTokens(device.id);

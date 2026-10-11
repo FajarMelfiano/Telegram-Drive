@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS kv (
  */
 function migrate(db: Db): void {
   const version = db.pragma('user_version', { simple: true }) as number;
-  if (version >= 3) return;
+  if (version >= 4) return;
   const tx = db.transaction(() => {
     // Lepas trigger FTS lama lebih dulu: wipe (DELETE) tidak boleh menyentuh
     // index lama yang akan dibuang — kalau tidak, perintah 'delete' dengan nilai
@@ -223,7 +223,15 @@ function migrate(db: Db): void {
         DROP TABLE sync_queue;
         ALTER TABLE sync_queue_new RENAME TO sync_queue;`);
     }
-    db.pragma('user_version = 3');
+    if (version < 4) {
+      // v4 → alur pairing baru: claimed_at = DISETUJUI HP, redeemed_at = SUDAH
+      // DITUKAR jadi token web. Dua penanda terpisah agar claim tetap single-use.
+      const cols = db.prepare(`PRAGMA table_info(pairing_codes)`).all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'redeemed_at')) {
+        db.exec('ALTER TABLE pairing_codes ADD COLUMN redeemed_at TEXT');
+      }
+    }
+    db.pragma('user_version = 4');
   });
   tx();
 }
@@ -539,22 +547,32 @@ export function revokeAllTokensForDevice(db: Db, deviceId: number): void {
 
 // ---- pairing code (login web via QR dari HP) ----
 
-export interface PairingRow { code: string; expiresAt: string; claimedAt: string | null; deviceLabel: string | null }
+export interface PairingRow {
+  code: string; expiresAt: string; deviceLabel: string | null;
+  claimedAt: string | null; redeemedAt: string | null;
+}
 
 export function savePairingCode(db: Db, code: string, expiresAt: string, deviceLabel: string | null): void {
-  db.prepare('INSERT OR REPLACE INTO pairing_codes (code, created_at, expires_at, claimed_at, device_label) VALUES (?, ?, ?, NULL, ?)')
+  db.prepare('INSERT OR REPLACE INTO pairing_codes (code, created_at, expires_at, claimed_at, redeemed_at, device_label) VALUES (?, ?, ?, NULL, NULL, ?)')
     .run(code, new Date().toISOString(), expiresAt, deviceLabel);
 }
 
 export function getPairingCode(db: Db, code: string): PairingRow | undefined {
-  const r = db.prepare('SELECT code, expires_at, claimed_at, device_label FROM pairing_codes WHERE code = ?')
-    .get(code) as { code: string; expires_at: string; claimed_at: string | null; device_label: string | null } | undefined;
-  return r ? { code: r.code, expiresAt: r.expires_at, claimedAt: r.claimed_at, deviceLabel: r.device_label } : undefined;
+  const r = db.prepare('SELECT code, expires_at, claimed_at, redeemed_at, device_label FROM pairing_codes WHERE code = ?')
+    .get(code) as { code: string; expires_at: string; claimed_at: string | null; redeemed_at: string | null; device_label: string | null } | undefined;
+  return r ? { code: r.code, expiresAt: r.expires_at, claimedAt: r.claimed_at, redeemedAt: r.redeemed_at, deviceLabel: r.device_label } : undefined;
 }
 
-/** Klaim atomik: hanya berhasil sekali (single-use). */
-export function claimPairingCode(db: Db, code: string): boolean {
+/** Approve atomik oleh HP yang sudah login: hanya berhasil sekali (single-use). */
+export function approvePairingCode(db: Db, code: string): boolean {
   const res = db.prepare('UPDATE pairing_codes SET claimed_at = ? WHERE code = ? AND claimed_at IS NULL')
+    .run(new Date().toISOString(), code);
+  return res.changes > 0;
+}
+
+/** Tukar kode → token oleh web: atomik, hanya berhasil sekali (single-use). */
+export function redeemPairingCode(db: Db, code: string): boolean {
+  const res = db.prepare('UPDATE pairing_codes SET redeemed_at = ? WHERE code = ? AND claimed_at IS NOT NULL AND redeemed_at IS NULL')
     .run(new Date().toISOString(), code);
   return res.changes > 0;
 }
