@@ -25,6 +25,7 @@ import { encrypt, decrypt } from './crypto.js';
 import { mapTelegramError, type TelegramFactory, type TelegramGateway, createRealGateway } from './telegram.js';
 import { buildXlsxBuffer } from './sync.js';
 import { createZipStream } from './zip.js';
+import { SseHub } from './sse.js';
 import type { AppConfig } from './config.js';
 
 export interface BuildAppOptions {
@@ -101,6 +102,13 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   const jwtKey = secret; // JWT memakai secret yang sama (personal-use)
   const pending = new Map<string, PendingAuth>();
   let cachedGateway: TelegramGateway | null = null;
+  const hub = new SseHub();
+
+  /** Catat aktivitas + push realtime ke semua klien SSE. */
+  const recordActivity = (type: string, detail?: unknown, id?: number): void => {
+    logActivity(db, type, detail);
+    hub.broadcast(type, detail, id);
+  };
 
   const app = Fastify({ logger: false });
   void app.register(cors, { origin: true });
@@ -415,6 +423,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
         channelId: sent.groupId, messageId: sent.messageId,
       });
       enqueueSync(db, file.id);
+      recordActivity('file.uploaded', { id: file.id, name: file.name, categoryKey: file.categoryKey, size: file.size });
       return { file };
     } catch (err) {
       return sendMappedError(reply, err);
@@ -517,7 +526,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
           .catch(() => undefined);
       }
     }
-    logActivity(db, 'file.updated', { id, displayName: updated.displayName, tags: updated.tags });
+    recordActivity('file.updated', { id, displayName: updated.displayName, tags: updated.tags });
     return { file: updated };
   });
 
@@ -531,7 +540,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
       if (gateway) await gateway.deleteMessages(file.channelId, [file.messageId]).catch(() => undefined);
     }
     deleteFile(db, id);
-    logActivity(db, 'file.deleted', { id, name: file.name });
+    recordActivity('file.deleted', { id, name: file.name });
     return { ok: true };
   });
 
@@ -560,7 +569,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
       // salinan sudah aman → hapus pesan lama (best-effort) lalu pindahkan baris DB
       await gateway.deleteMessages(file.channelId, [file.messageId]).catch(() => undefined);
       const updated = moveFileCategory(db, id, cat.key, { channelId: dest.groupId, messageId: dest.messageId })!;
-      logActivity(db, 'file.moved', { id, to: cat.key });
+      recordActivity('file.moved', { id, to: cat.key });
       return { file: updated };
     } catch (err) {
       return sendMappedError(reply, err);
@@ -631,7 +640,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
             await gateway.deleteMessages(file.channelId, [file.messageId]).catch(() => undefined);
           }
           deleteFile(db, id);
-          logActivity(db, 'file.deleted', { id, name: file.name });
+          recordActivity('file.deleted', { id, name: file.name });
         } else if (action === 'move') {
           const cat = getCategoryByKey(db, body.data.category!)!;
           if (!gateway) { results.push({ id, ok: false, error: 'NOT_LOGGED_IN' }); continue; }
@@ -643,13 +652,13 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
             const dest = await sendToCategory(gateway, cat.key, cat.label, tempPath, file.name);
             await gateway.deleteMessages(file.channelId, [file.messageId]).catch(() => undefined);
             moveFileCategory(db, id, cat.key, { channelId: dest.groupId, messageId: dest.messageId });
-            logActivity(db, 'file.moved', { id, to: cat.key });
+            recordActivity('file.moved', { id, to: cat.key });
           } finally {
             await unlink(tempPath).catch(() => undefined);
           }
         } else if (action === 'tag') {
           updateFile(db, id, { tags: body.data.tags! });
-          logActivity(db, 'file.updated', { id, tags: body.data.tags });
+          recordActivity('file.updated', { id, tags: body.data.tags });
         }
         results.push({ id, ok: true });
       } catch (err) {
@@ -668,7 +677,42 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
       .send(buf);
   });
 
+  // ---- routes: statistik & riwayat aktivitas ----
+
+  /** Dasbor penyimpanan: total, per kategori, per ekstensi, per sumber. */
+  app.get('/stats', { preHandler: requireAuth }, async () => getStats(db));
+
+  /** Riwayat aktivitas (terbaru dulu). */
+  app.get('/activity', { preHandler: requireAuth }, async (req) => {
+    const q = z.object({ limit: z.coerce.number().int().positive().max(200).default(50) }).safeParse(req.query);
+    const limit = q.success ? q.data.limit : 50;
+    return { activity: listActivity(db, limit) };
+  });
+
+  /**
+   * SSE: push realtime (file baru, status WhatsApp, sinkron selesai).
+   * Auth via ?token= (EventSource tak bisa set header Authorization).
+   * Klien wajib tangani reconnect; Last-Event-ID dipakai resume bila perlu.
+   */
+  app.get('/events', { preHandler: requireAuth }, async (req, reply) => {
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'access-control-allow-origin': '*',
+    });
+    reply.raw.write('retry: 3000\n\n');
+    // heartbeat tiap 25 detik agar koneksi tak dianggap idle oleh proxy
+    const heartbeat = setInterval(() => { try { reply.raw.write(': ping\n\n'); } catch { /* noop */ } }, 25_000);
+    const unsubscribe = hub.subscribe(reply);
+    reply.raw.on('close', () => { clearInterval(heartbeat); unsubscribe(); });
+    // biar Fastify tidak menutup reply secara otomatis
+    return reply;
+  });
+
   app.get('/health', async () => ({ ok: true }));
+
+  app.addHook('onClose', async () => { hub.closeAll(); });
 
   app.decorate('db', db);
   return app;

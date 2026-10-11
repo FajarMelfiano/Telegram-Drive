@@ -580,6 +580,111 @@ describe('zip massal', () => {
   });
 });
 
+describe('statistik penyimpanan', () => {
+  it('menghitung total, per kategori, per ekstensi, dan per sumber', async () => {
+    const token = await login();
+    await upload(token, 'laporan.pdf', 'application/pdf', 'x');
+    await upload(token, 'foto.jpg', 'image/jpeg', 'x');
+    await upload(token, 'foto2.jpg', 'image/jpeg', 'x');
+
+    const res = await app.inject({ method: 'GET', url: '/stats', headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(200);
+    const stats = res.json() as {
+      totalFiles: number; totalBytes: number;
+      byCategory: Array<{ key: string; count: number; bytes: number }>;
+      byExt: Array<{ ext: string; count: number }>;
+      bySource: Array<{ source: string; count: number }>;
+    };
+    expect(stats.totalFiles).toBe(3);
+    expect(stats.totalBytes).toBe(3); // 3 file 'x' 1 byte... cek aktual
+    const dokumen = stats.byCategory.find((c) => c.key === 'dokumen');
+    expect(dokumen?.count).toBe(1);
+    const gambar = stats.byCategory.find((c) => c.key === 'gambar');
+    expect(gambar?.count).toBe(2);
+    expect(stats.byExt.find((e) => e.ext === 'jpg')?.count).toBe(2);
+    expect(stats.bySource.find((s) => s.source === 'telegram')?.count).toBe(3);
+  });
+});
+
+describe('riwayat aktivitas', () => {
+  it('mencatat upload lalu bisa dibaca (terbaru dulu)', async () => {
+    const token = await login();
+    const up = await upload(token, 'aktivitas.pdf', 'application/pdf', 'x');
+    const { file } = up.json() as { file: { id: number } };
+    await app.inject({ method: 'PATCH', url: `/files/${file.id}`, headers: { authorization: `Bearer ${token}` }, payload: { tags: ['baruu'] } });
+
+    const res = await app.inject({ method: 'GET', url: '/activity?limit=10', headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(200);
+    const { activity } = res.json() as { activity: Array<{ type: string; detail: { id?: number } }> };
+    expect(activity.length).toBeGreaterThanOrEqual(2);
+    // terbaru dulu: file.updated di atas file.uploaded
+    const updIdx = activity.findIndex((a) => a.type === 'file.updated');
+    const upIdx = activity.findIndex((a) => a.type === 'file.uploaded');
+    expect(updIdx).toBeGreaterThanOrEqual(0);
+    expect(upIdx).toBeGreaterThanOrEqual(0);
+    expect(updIdx).toBeLessThan(upIdx);
+    expect(activity[updIdx]?.detail.id).toBe(file.id);
+  });
+
+  it('membatasi jumlah sesuai limit', async () => {
+    const token = await login();
+    await upload(token, 'a.pdf', 'application/pdf', 'x');
+    const res = await app.inject({ method: 'GET', url: '/activity?limit=1', headers: { authorization: `Bearer ${token}` } });
+    expect((res.json() as { activity: unknown[] }).activity).toHaveLength(1);
+  });
+});
+
+describe('SSE /events', () => {
+  it('menolak tanpa token (401)', async () => {
+    const noAuth = await app.inject({ method: 'GET', url: '/events' });
+    expect(noAuth.statusCode).toBe(401);
+  });
+
+  it('menerima ?token= dan stream event realtime saat file diunggah', async () => {
+    const token = await login();
+    const address = await app.listen({ port: 0, host: '127.0.0.1' });
+    const ac = new AbortController();
+    try {
+      const res = await fetch(`${address}/events?token=${token}`, { signal: ac.signal });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/event-stream');
+
+      // baca stream di background, kumpulkan potongan yang masuk
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      const pump = (async () => {
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+          }
+        } catch { /* abort diakhiri test */ }
+      })();
+
+      // beri waktu koneksi terbentuk, lalu unggah file → harus mem-broadcast file.uploaded
+      await new Promise((r) => setTimeout(r, 100));
+      const mp = multipart('live.pdf', 'application/pdf', 'isi-live');
+      const up = await fetch(`${address}/files`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, ...mp.headers },
+        body: mp.payload,
+      });
+      expect(up.status).toBe(200);
+
+      // tunggu event file.uploaded tiba di stream
+      const deadline = Date.now() + 3000;
+      while (!buf.includes('event: file.uploaded') && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(buf).toContain('event: file.uploaded');
+    } finally {
+      ac.abort();
+    }
+  });
+});
+
 describe('search', () => {
   it('parser + FTS menemukan file yang baru diupload', async () => {
     const token = await login();
