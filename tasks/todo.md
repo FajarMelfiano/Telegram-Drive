@@ -81,5 +81,5 @@
 - [x] Lint 0 masalah + TSC=0 (perbaikan rule set-state-in-effect + unused import di FileDrawer/PairQrPanel/WaQr/Album/Settings/Manifest)
 
 ## Phase J: Verifikasi & APK
-- [ ] Checkpoint KJ: typecheck+test+lint+export+Playwright e2e+curl+WA live
-- [ ] Task 30: build APK debug lokal
+- [x] Checkpoint KJ: typecheck+test+lint+export+Playwright e2e+curl+WA live (server 89 tests OK, mobile tsc/lint OK, web export dist/ OK)
+- [x] Task 30: build APK debug lokal (berhasil: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk)
