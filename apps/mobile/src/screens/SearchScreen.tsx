@@ -3,8 +3,10 @@ import {
   ActivityIndicator, FlatList, Pressable, ScrollView,
   StyleSheet, Text, TextInput, View,
 } from 'react-native';
-import { Api, ApiError, type FileRow, type ParsedQuery } from '../api';
+import { Search } from 'lucide-react-native';
+import { Api, ApiError, downloadFile, type FileRow, type ParsedQuery } from '../api';
 import { ManifestRow } from '../components/ManifestRow';
+import { FileDrawer } from '../components/FileDrawer';
 import { color, font, fontSize, radius, space } from '../theme';
 
 const SUGGESTIONS = ['pdf laporan juni', 'gambar bulan lalu', 'video >100mb', 'xlsx 2025', 'kemarin'];
@@ -32,6 +34,7 @@ export function SearchScreen({ token }: { token: string }) {
   const [parsed, setParsed] = useState<ParsedQuery | null>(null);
   const [results, setResults] = useState<FileRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [drawer, setDrawer] = useState<FileRow | null>(null);
 
   const run = async (query: string) => {
     if (!query.trim()) return;
@@ -48,11 +51,22 @@ export function SearchScreen({ token }: { token: string }) {
     }
   };
 
+  const handleDownload = async (f: FileRow) => {
+    try {
+      await downloadFile(token, f);
+    } catch (err) {
+      setError(err instanceof ApiError ? `Gagal unduh (${err.code})` : 'Server tidak terjangkau.');
+    }
+  };
+
   return (
     <View style={styles.root}>
       <View style={styles.header}>
-        <Text style={styles.title}>CARI</Text>
-        <Text style={styles.sub}>TANYAKAN APA SAJA — "PDF LAPORAN JUNI", "GAMBAR BULAN LALU"</Text>
+        <View style={styles.titleRow}>
+          <Search size={18} strokeWidth={1.5} color={color.amber} />
+          <Text style={styles.title}>CARI</Text>
+        </View>
+        <Text style={styles.sub}>TANYAKAN APA SAJA — “PDF LAPORAN JUNI”, “GAMBAR BULAN LALU”</Text>
       </View>
 
       <View style={styles.inputRow}>
@@ -106,11 +120,21 @@ export function SearchScreen({ token }: { token: string }) {
           <FlatList
             data={results}
             keyExtractor={(f) => String(f.id)}
-            renderItem={({ item, index }) => <ManifestRow file={item} index={index} />}
+            renderItem={({ item, index }) => (
+              <ManifestRow
+                file={item}
+                index={index}
+                token={token}
+                onPress={setDrawer}
+                onDownload={(f) => void handleDownload(f)}
+              />
+            )}
             ListHeaderComponent={<Text style={styles.count}>{results.length} HASIL</Text>}
           />
         )}
       </View>
+
+      <FileDrawer file={drawer} token={token} onClose={() => setDrawer(null)} onDownload={handleDownload} />
     </View>
   );
 }
@@ -118,6 +142,7 @@ export function SearchScreen({ token }: { token: string }) {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: color.base },
   header: { paddingHorizontal: space(4), paddingVertical: space(3), borderBottomWidth: 1, borderBottomColor: color.hairline },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: space(2) },
   title: { color: color.textPrimary, fontSize: fontSize.lg, fontWeight: '700', letterSpacing: 2 },
   sub: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 1, marginTop: 2 },
   inputRow: {

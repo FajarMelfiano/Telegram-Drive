@@ -84,13 +84,39 @@ CREATE TABLE IF NOT EXISTS sync_queue (
   queued_at TEXT NOT NULL,
   sent_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS drive_group (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  group_id INTEGER NOT NULL,
+  group_title TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 `;
+
+/**
+ * Migrasi sekali-jalan (PRAGMA user_version).
+ * v2 → era grup forum: channel-per-kategori diganti 1 grup + topik/kategori.
+ *   - baris files + sync_queue lama menunjuk channel yang sudah dihapus → dibersihkan
+ *   - referensi channel kategori di-reset (akan terisi ulang oleh topik)
+ *   - **tg_sessions TIDAK disentuh** → user tidak perlu login ulang.
+ */
+function migrate(db: Db): void {
+  const version = db.pragma('user_version', { simple: true }) as number;
+  if (version >= 2) return;
+  const wipe = db.transaction(() => {
+    db.exec('DELETE FROM sync_queue; DELETE FROM files;');
+    db.exec(`UPDATE categories SET channel_id = NULL, channel_title = NULL, state = 'pending_channel';`);
+    db.pragma('user_version = 2');
+  });
+  wipe();
+}
 
 export function initDb(path: string): Db {
   const db = new Database(path);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 
@@ -123,10 +149,37 @@ export function getCategoryByKey(db: Db, key: string): CategoryRaw | undefined {
   return db.prepare('SELECT * FROM categories WHERE key = ?').get(key) as CategoryRaw | undefined;
 }
 
-export function upsertCategoryChannel(db: Db, key: string, channelId: number, channelTitle: string): void {
+export function upsertCategoryTopic(db: Db, key: string, topicId: number, topicTitle: string): void {
   db.prepare(`
     UPDATE categories SET channel_id = ?, channel_title = ?, state = 'ready' WHERE key = ?
-  `).run(channelId, channelTitle, key);
+  `).run(topicId, topicTitle, key);
+}
+
+// ---- grup forum tunggal (singleton) ----
+
+export interface DriveGroupRow { groupId: number; groupTitle: string }
+
+export function getDriveGroup(db: Db): DriveGroupRow | undefined {
+  const row = db.prepare('SELECT group_id, group_title FROM drive_group WHERE id = 1').get() as
+    | { group_id: number; group_title: string } | undefined;
+  return row ? { groupId: row.group_id, groupTitle: row.group_title } : undefined;
+}
+
+export function saveDriveGroup(db: Db, input: DriveGroupRow): void {
+  db.prepare(`
+    INSERT INTO drive_group (id, group_id, group_title, created_at) VALUES (1, @groupId, @groupTitle, @createdAt)
+    ON CONFLICT(id) DO UPDATE SET group_id = @groupId, group_title = @groupTitle
+  `).run({ ...input, createdAt: new Date().toISOString() });
+}
+
+/** Lepas cache grup (mis. grup dihapus user) → upload berikut membuat ulang. */
+export function clearDriveGroup(db: Db): void {
+  db.prepare('DELETE FROM drive_group WHERE id = 1').run();
+}
+
+/** Reset referensi topik semua kategori (grup/topik sudah tak ada di Telegram). */
+export function resetCategoryTopics(db: Db): void {
+  db.prepare(`UPDATE categories SET channel_id = NULL, channel_title = NULL, state = 'pending_channel'`).run();
 }
 
 /** Insert file; idempoten — duplikat file_uid (atau channel+message) mengembalikan baris lama. */

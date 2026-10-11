@@ -99,3 +99,24 @@ export const Api = {
     return api<{ file: FileRow }>('/files', { token, formData: form });
   },
 };
+
+/** URL unduh (auth lewat ?token= — aman dipakai <img> dan link langsung). */
+export function fileDownloadUrl(file: FileRow, token: string | null): string {
+  return `${API_BASE}/files/${file.id}/download?token=${encodeURIComponent(token ?? '')}`;
+}
+
+/**
+ * Unduh file ke perangkat. Web: navigate ke URL (server kirim disposition
+ * attachment → browser mengunduh dengan nama asli). Native: buka via browser.
+ */
+export async function downloadFile(token: string | null, file: FileRow): Promise<void> {
+  const url = fileDownloadUrl(file, token);
+  if (Platform.OS === 'web') {
+    (globalThis as unknown as { location: { href: string } }).location.href = url;
+    return;
+  }
+  const { Linking } = await import('react-native');
+  const ok = await Linking.canOpenURL(url);
+  if (!ok) throw new ApiError(0, 'CANNOT_OPEN_URL');
+  await Linking.openURL(url);
+}

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,9 +11,10 @@ import { SignJWT, jwtVerify } from 'jose';
 import { z } from 'zod';
 import { parseQuery, classifyFile, CATEGORY_LABELS, type FileCategory } from '@td/shared';
 import {
-  initDb, ensureCategories, listCategories, getCategoryByKey, upsertCategoryChannel,
-  insertFile, searchFiles, listFiles, enqueueSync, getSyncStats,
+  initDb, ensureCategories, listCategories, getCategoryByKey, upsertCategoryTopic,
+  insertFile, searchFiles, listFiles, enqueueSync, getSyncStats, getFileById,
   saveSession, getSession, deleteSession,
+  getDriveGroup, saveDriveGroup, clearDriveGroup, resetCategoryTopics,
 } from './db.js';
 import { encrypt, decrypt } from './crypto.js';
 import { mapTelegramError, type TelegramFactory, type TelegramGateway, createRealGateway } from './telegram.js';
@@ -27,6 +28,10 @@ export interface BuildAppOptions {
 }
 
 const AUTH_TTL_MS = 10 * 60 * 1000;
+
+/** Satu grup forum tunggal; tiap kategori jadi topik di dalamnya. */
+export const DRIVE_GROUP_TITLE = 'Telegram Drive';
+export const DRIVE_GROUP_ABOUT = 'Gudang file pribadi — tiap kategori jadi topik.';
 
 const StartSchema = z.object({
   apiId: z.number().int().positive(),
@@ -63,7 +68,9 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
 
   const requireAuth = async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const header = req.headers.authorization ?? '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    const q = req.query as { token?: unknown };
+    const queryToken = typeof q.token === 'string' ? q.token : '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : queryToken;
     if (!token) { await reply.code(401).send({ error: 'UNAUTHORIZED' }); return; }
     try {
       const { payload } = await jwtVerify(token, jwtKey);
@@ -88,6 +95,48 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     const status = mapped.code === 'FLOOD_WAIT' ? 429
       : mapped.code === 'PHONE_CODE_INVALID' || mapped.code === 'PASSWORD_INVALID' ? 401 : 400;
     await reply.code(status).send({ error: mapped.code, retryAfterSeconds: mapped.retryAfterSeconds });
+  };
+
+  /** Grup/topik hilang dari Telegram (mis. dihapus user) — bukan masalah data. */
+  const isPeerGone = (err: unknown): boolean =>
+    /PEER_ID_INVALID|CHANNEL_PRIVATE|CHANNEL_INVALID|CHAT_ADMIN_REQUIRED/i.test(
+      String(err instanceof Error ? err.message : err),
+    );
+
+  /**
+   * Pastikan grup forum + topik kategori siap, lalu kirim file ke topik.
+   * Idempoten: grup/topik di-cache di DB; kalau peer hilang → reset cache + coba
+   * sekali lagi dengan grup/topik segar.
+   */
+  const sendToCategory = async (
+    gateway: TelegramGateway, category: string, label: string, tempPath: string, name: string,
+  ): Promise<{ groupId: number; topicId: number; messageId: number }> => {
+    const attempt = async () => {
+      let group = getDriveGroup(db);
+      if (!group) {
+        const created = await gateway.ensureDriveGroup(DRIVE_GROUP_TITLE, DRIVE_GROUP_ABOUT);
+        group = { groupId: created.groupId, groupTitle: created.title };
+        saveDriveGroup(db, group);
+      }
+      const groupId = group.groupId;
+      const cat = getCategoryByKey(db, category)!;
+      let topicId = cat.channel_id;
+      if (topicId == null) {
+        const topic = await gateway.ensureTopic(groupId, label);
+        upsertCategoryTopic(db, category, topic.topicId, topic.title);
+        topicId = topic.topicId;
+      }
+      const sent = await gateway.sendFileToTopic(groupId, topicId, tempPath, name);
+      return { groupId, topicId, messageId: sent.messageId };
+    };
+    try {
+      return await attempt();
+    } catch (err) {
+      if (!isPeerGone(err)) throw err;
+      clearDriveGroup(db);
+      resetCategoryTopics(db);
+      return attempt(); // sekali lagi dengan grup/topik segar
+    }
   };
 
   const finalizeLogin = async (flow: PendingAuth, requestId: string): Promise<FastifyReply | { token: string; me: unknown }> => {
@@ -193,19 +242,17 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
 
       const { category } = classifyFile(part.mimetype ?? '', part.filename ?? '');
       const label = CATEGORY_LABELS[category as FileCategory];
-      const channel = await gateway.ensureCategoryChannel(`Drive · ${label}`, `Kategori ${label} — Telegram Drive`);
-      upsertCategoryChannel(db, category, channel.channelId, channel.title);
-
       const cat = getCategoryByKey(db, category)!;
       const name = part.filename ?? 'file';
       const dot = name.lastIndexOf('.');
       const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : null;
-      const sent = await gateway.sendFileToChannel(channel.channelId, tempPath, name);
+
+      const sent = await sendToCategory(gateway, category, label, tempPath, name);
 
       const file = insertFile(db, {
         fileUid: randomUUID(), name, ext, mime: part.mimetype ?? null, size,
         uploadedAt: new Date().toISOString(), categoryId: cat.id,
-        channelId: sent.channelId, messageId: sent.messageId,
+        channelId: sent.groupId, messageId: sent.messageId,
       });
       enqueueSync(db, file.id);
       return { file };
@@ -232,6 +279,34 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   });
 
   app.get('/categories', { preHandler: requireAuth }, async () => ({ categories: listCategories(db) }));
+
+  /**
+   * Unduh file dari Telegram → stream ke client (disposition: attachment).
+   * Menerima auth lewat header Bearer ATAU ?token= (untuk <img>/link langsung).
+   */
+  app.get('/files/:id/download', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    const file = getFileById(db, id);
+    if (!file) return reply.code(404).send({ error: 'FILE_NOT_FOUND' });
+    if (file.channelId == null || file.messageId == null) return reply.code(409).send({ error: 'NOT_UPLOADED' });
+    const gateway = await getGateway();
+    if (!gateway) return reply.code(401).send({ error: 'NOT_LOGGED_IN' });
+
+    const tempPath = join(tmpdir(), `td-dl-${randomUUID()}`);
+    try {
+      await gateway.downloadFile(file.channelId, file.messageId, tempPath);
+      const asciiName = file.name.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, "'");
+      const stream = createReadStream(tempPath);
+      stream.on('close', () => void unlink(tempPath).catch(() => undefined));
+      return reply
+        .header('content-type', file.mime ?? 'application/octet-stream')
+        .header('content-disposition', `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(file.name)}`)
+        .send(stream);
+    } catch (err) {
+      await unlink(tempPath).catch(() => undefined);
+      return sendMappedError(reply, err);
+    }
+  });
 
   app.get('/sync/status', { preHandler: requireAuth }, async () => getSyncStats(db));
 

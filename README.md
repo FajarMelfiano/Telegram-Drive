@@ -1,9 +1,10 @@
 # Telegram Drive
 
-Gudang pribadi di atas akun Telegram: unggah file → otomatis terklasifikasi ke channel
-per kategori ("Drive · Gambar", "Drive · Dokumen", …) → tercatat di manifest (SQLite)
-→ tersinkron ke Google Sheets + file `.xlsx` → dicari dengan query bahasa sehari-hari
-("pdf laporan juni", "gambar bulan lalu").
+Gudang pribadi di atas akun Telegram: unggah file → otomatis terklasifikasi ke **topik
+kategori** di dalam **satu grup forum** "Telegram Drive" (Gambar, Dokumen, …) → tercatat
+di manifest (SQLite) → tersinkron ke Google Sheets + file `.xlsx` → dicari dengan query
+bahasa sehari-hari ("pdf laporan juni", "gambar bulan lalu") → file bisa langsung
+**diunduh** dari app (ikon tipe + drawer detail).
 
 ## Struktur
 
@@ -77,8 +78,9 @@ Buka `http://localhost:8090`, login dengan nomor `+62…` apa pun dan kode `1234
 | POST | `/auth/verify` | verifikasi OTP (→ 2FA bila perlu) |
 | POST | `/auth/password` | password 2FA |
 | GET | `/me` | profil + nomor |
-| POST | `/files` | unggah file (multipart) → klasifikasi → channel → catat |
+| POST | `/files` | unggah file (multipart) → klasifikasi → topik kategori → catat |
 | GET | `/files?category=&limit=` | daftar manifest |
+| GET | `/files/:id/download` | unduh file dari Telegram (Bearer atau `?token=`) |
 | GET | `/search?q=pdf%20juni` | pencarian pintar (parser + FTS5) |
 | GET | `/categories` | kategori + jumlah file |
 | GET | `/sync/status` | status antrean Sheets |

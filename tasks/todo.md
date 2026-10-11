@@ -22,6 +22,22 @@
       via riwayat channel (server/scripts/verify-live.ts)
 - [x] Task 12: README + .env.example + laporan
 
+## Phase E: Redesain penyimpanan (1 grup forum + topik/kategori)
+- [x] Task 13: Gateway forum (ensureDriveGroup/ensureTopic/sendFileToTopic replyTo+topMsgId)
+- [x] Task 14: DB migration v2 (drive_group singleton, topic refs reset, sesi utuh)
+- [x] Task 15: Hapus channel "Drive · *" lama (cleanup-old-channels.ts) + verify-live
+      membaca topik grup forum; live: grup "Telegram Drive" id 3744174906,
+      topik General#1/Dokumen#2/Gambar#4, msg#3 topik=2 & msg#5 topik=4
+
+## Phase F: Unduh file + ikon tipe + drawer detail (brainstorm-download-ui.md)
+- [x] Task 16: Gateway downloadFile (peer marked -100<id> → getMessages + downloadMedia)
+      + GET /files/:id/download (Bearer atau ?token=, attachment UTF-8) + 3 test
+- [x] Task 17: UI — fileType.ts glyph per ekstensi (palet tanpa warna baru),
+      ManifestRow (tile/thumbnail + tombol unduh + press state), FileDrawer
+      (preview/meta/UNDUH/TELEGRAM), rail kategori responsif < 720 px
+- [x] Task 18: Verifikasi — 57 test hijau, lint 0, export web, live curl 200,
+      Playwright: drawer + download event 40000 B identik + search fresh konsisten
+
 ## Checkpoint
 - [x] A: test shared hijau (20/20) + typecheck bersih
 - [x] B: server start + 31 test hijau + curl smoke (/health, /categories→401)

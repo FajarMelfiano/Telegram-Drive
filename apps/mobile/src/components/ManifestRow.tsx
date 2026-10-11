@@ -1,6 +1,8 @@
-import { memo } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
-import type { FileRow } from '../api';
+import { memo, useState } from 'react';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Download } from 'lucide-react-native';
+import { fileDownloadUrl, type FileRow } from '../api';
+import { glyphFor, tinted } from '../fileType';
 import { color, font, fontSize, radius, space, stateColor } from '../theme';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -24,16 +26,52 @@ function formatDate(iso: string): string {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
-/** Satu baris manifest: nomor urut mono, lencana ekstensi, nama, ukuran, tanggal, status. */
-export const ManifestRow = memo(function ManifestRow({ file, index }: { file: FileRow; index: number }) {
+/** Tile 32×32: thumbnail asli untuk gambar (dari server), glyph berwarna untuk sisanya. */
+function TypeTile({ file, token, size = 32 }: { file: FileRow; token: string | null; size?: number }) {
+  const glyph = glyphFor(file.ext);
+  const canThumb = glyph.image && file.channelId != null && file.messageId != null;
+  const [thumbFail, setThumbFail] = useState(false);
+  const box = { width: size, height: size, borderRadius: radius.control };
+
+  if (canThumb && !thumbFail) {
+    return (
+      <Image
+        source={{ uri: fileDownloadUrl(file, token) }}
+        style={[box, { backgroundColor: color.surfaceAlt }]}
+        onError={() => setThumbFail(true)}
+        resizeMode="cover"
+      />
+    );
+  }
   return (
-    <View style={styles.row}>
+    <View style={[box, styles.tile, { backgroundColor: tinted(glyph.color, 0.12), borderColor: tinted(glyph.color, 0.35) }]}>
+      <glyph.Icon size={size * 0.5} strokeWidth={1.5} color={glyph.color} />
+    </View>
+  );
+}
+
+/**
+ * Satu baris manifest: nomor urut mono, tile tipe (thumbnail/glyph), nama + meta,
+ * pill status, tombol unduh. Ketuk baris → drawer detail (onPress).
+ */
+export const ManifestRow = memo(function ManifestRow({
+  file, index, token, onPress, onDownload,
+}: {
+  file: FileRow;
+  index: number;
+  token: string | null;
+  onPress?: (file: FileRow) => void;
+  onDownload?: (file: FileRow) => void;
+}) {
+  return (
+    <Pressable
+      onPress={() => onPress?.(file)}
+      style={({ pressed }) => [styles.row, pressed && onPress && { backgroundColor: color.surfaceAlt }]}
+    >
       <Text style={styles.index} numberOfLines={1}>
         {String(index + 1).padStart(4, '0')}
       </Text>
-      <View style={styles.extBadge}>
-        <Text style={styles.extText}>{(file.ext ?? '—').slice(0, 4).toUpperCase()}</Text>
-      </View>
+      <TypeTile file={file} token={token} />
       <View style={styles.main}>
         <Text style={styles.name} numberOfLines={1}>
           {file.name}
@@ -48,7 +86,15 @@ export const ManifestRow = memo(function ManifestRow({ file, index }: { file: Fi
           {STATUS_LABEL[file.state] ?? file.state.toUpperCase()}
         </Text>
       </View>
-    </View>
+      <Pressable
+        onPress={() => onDownload?.(file)}
+        hitSlop={8}
+        style={({ pressed }) => [styles.dlBtn, pressed && { backgroundColor: color.amber }]}
+        accessibilityLabel={`Unduh ${file.name}`}
+      >
+        {({ pressed }) => <Download size={15} strokeWidth={1.5} color={pressed ? color.base : color.textMuted} />}
+      </Pressable>
+    </Pressable>
   );
 });
 
@@ -57,20 +103,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: space(3),
-    paddingVertical: space(3),
+    paddingVertical: space(2.5),
     paddingHorizontal: space(4),
     borderBottomWidth: 1,
     borderBottomColor: color.hairline,
   },
-  index: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, width: 34 },
-  extBadge: {
-    borderWidth: 1,
-    borderColor: color.hairline,
-    borderRadius: radius.control,
-    paddingHorizontal: space(1.5),
-    paddingVertical: space(0.5),
-  },
-  extText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textMuted, letterSpacing: 0.5 },
+  index: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, width: 30 },
+  tile: { alignItems: 'center', justifyContent: 'center', borderWidth: 1 },
   main: { flex: 1, minWidth: 0 },
   name: { color: color.textPrimary, fontSize: fontSize.base },
   meta: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, marginTop: 2 },
@@ -85,4 +124,8 @@ const styles = StyleSheet.create({
   },
   statusDot: { width: 5, height: 5, borderRadius: 3 },
   statusText: { fontFamily: font.mono, fontSize: fontSize.xs, letterSpacing: 0.5 },
+  dlBtn: {
+    width: 30, height: 30, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
+  },
 });

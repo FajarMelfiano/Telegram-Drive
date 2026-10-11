@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Text, View,
+  ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Text, useWindowDimensions, View,
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
-import { Api, ApiError, type CategoryRow, type FileRow } from '../api';
+import { Inbox, RefreshCw, Upload } from 'lucide-react-native';
+import { Api, ApiError, downloadFile, type CategoryRow, type FileRow } from '../api';
 import { ManifestRow } from '../components/ManifestRow';
 import { CategoryRail } from '../components/CategoryRail';
+import { FileDrawer } from '../components/FileDrawer';
 import { color, font, fontSize, radius, space } from '../theme';
 
 /**
@@ -21,6 +23,9 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
   const [uploading, setUploading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [sync, setSync] = useState<{ pending: number; sent: number } | null>(null);
+  const [drawer, setDrawer] = useState<FileRow | null>(null);
+  const { width } = useWindowDimensions();
+  const narrow = width < 720;
 
   const load = useCallback(async () => {
     try {
@@ -41,6 +46,8 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
     }
   }, [token, active]);
 
+  // load() selalu async (setState terjadi setelah await) — false positive rule ini.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(); }, [load]);
 
   const pickAndUpload = async () => {
@@ -62,6 +69,15 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
     }
   };
 
+  const handleDownload = async (f: FileRow) => {
+    setNotice(`Mengunduh ${f.name}…`);
+    try {
+      await downloadFile(token, f);
+    } catch (err) {
+      setNotice(err instanceof ApiError ? `Gagal unduh (${err.code})` : 'Server tidak terjangkau.');
+    }
+  };
+
   return (
     <View style={styles.root}>
       <View style={styles.header}>
@@ -79,7 +95,12 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
             </View>
           )}
           <Pressable onPress={() => void load()} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
-            <Text style={styles.iconBtnText}>MUAT</Text>
+            {({ pressed }) => (
+              <View style={styles.iconBtnInner}>
+                <RefreshCw size={12} strokeWidth={1.5} color={pressed ? color.amber : color.textMuted} />
+                <Text style={styles.iconBtnText}>MUAT</Text>
+              </View>
+            )}
           </Pressable>
           <Pressable onPress={onLogout} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
             <Text style={styles.iconBtnText}>KELUAR</Text>
@@ -87,9 +108,14 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
         </View>
       </View>
 
-      <View style={styles.body}>
-        <View style={styles.railWrap}>
-          <CategoryRail categories={categories} active={active} onSelect={setActive} />
+      <View style={[styles.body, narrow && styles.bodyColumn]}>
+        <View style={[styles.railWrap, narrow ? styles.railWrapNarrow : null]}>
+          <CategoryRail
+            categories={categories}
+            active={active}
+            onSelect={setActive}
+            layout={narrow ? 'horizontal' : 'vertical'}
+          />
         </View>
 
         <View style={styles.listWrap}>
@@ -99,10 +125,19 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
             <FlatList
               data={files}
               keyExtractor={(f) => String(f.id)}
-              renderItem={({ item, index }) => <ManifestRow file={item} index={index} />}
+              renderItem={({ item, index }) => (
+                <ManifestRow
+                  file={item}
+                  index={index}
+                  token={token}
+                  onPress={setDrawer}
+                  onDownload={(f) => void handleDownload(f)}
+                />
+              )}
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); void load(); }} tintColor={color.amber} />}
               ListEmptyComponent={
                 <View style={styles.center}>
+                  <Inbox size={40} strokeWidth={1} color={color.textFaint} />
                   <Text style={styles.emptyTitle}>GUDANG MASIH KOSONG</Text>
                   <Text style={styles.emptyBody}>Jatuhkan file pertama — sistem mengirimnya{'\n'}ke lorong kategori yang benar dan mencatatnya di sini.</Text>
                 </View>
@@ -121,9 +156,16 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
         >
           {uploading
             ? <ActivityIndicator color={color.base} />
-            : <Text style={styles.uploadText}>+ UNGGAH FILE</Text>}
+            : (
+              <View style={styles.uploadInner}>
+                <Upload size={16} strokeWidth={1.5} color={color.base} />
+                <Text style={styles.uploadText}>UNGGAH FILE</Text>
+              </View>
+            )}
         </Pressable>
       </View>
+
+      <FileDrawer file={drawer} token={token} onClose={() => setDrawer(null)} onDownload={handleDownload} />
     </View>
   );
 }
@@ -146,9 +188,12 @@ const styles = StyleSheet.create({
   dot: { width: 5, height: 5, borderRadius: 3 },
   syncText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textMuted, letterSpacing: 0.5 },
   iconBtn: { borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control, paddingHorizontal: space(2.5), paddingVertical: space(1.5) },
+  iconBtnInner: { flexDirection: 'row', alignItems: 'center', gap: space(1.5) },
   iconBtnText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textMuted, letterSpacing: 1 },
   body: { flex: 1, flexDirection: 'row' },
+  bodyColumn: { flexDirection: 'column' },
   railWrap: { width: 172 },
+  railWrapNarrow: { width: '100%', borderBottomWidth: 1, borderBottomColor: color.hairline, paddingHorizontal: space(3) },
   listWrap: { flex: 1 },
   center: { alignItems: 'center', padding: space(8), gap: space(3) },
   loadingText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 2 },
@@ -157,5 +202,6 @@ const styles = StyleSheet.create({
   footer: { borderTopWidth: 1, borderTopColor: color.hairline, padding: space(3), gap: space(2) },
   notice: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber, letterSpacing: 0.5 },
   uploadBtn: { backgroundColor: color.amber, borderRadius: radius.control, paddingVertical: space(3.5), alignItems: 'center' },
+  uploadInner: { flexDirection: 'row', alignItems: 'center', gap: space(2) },
   uploadText: { color: color.base, fontWeight: '700', letterSpacing: 1.5, fontSize: fontSize.sm },
 });

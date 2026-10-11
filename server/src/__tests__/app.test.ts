@@ -1,15 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { writeFile } from 'node:fs/promises';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../app.js';
-import type { TelegramGateway, ChannelInfo, MeInfo, SentFileResult } from '../telegram.js';
+import type { TelegramGateway, DriveGroupInfo, TopicInfo, MeInfo, SentFileResult } from '../telegram.js';
 
 const KEY = '1'.repeat(64);
 
 class FakeGateway implements TelegramGateway {
-  channels = new Map<string, ChannelInfo>();
-  sent: Array<{ channelId: number; filePath: string; caption: string }> = [];
+  group: DriveGroupInfo | null = null;
+  topics = new Map<string, TopicInfo>();
+  sent: Array<{ groupId: number; topicId: number; filePath: string; caption: string }> = [];
   requireTwoFa = false;
   private msgId = 100;
+  private topicId = 10;
 
   constructor(public apiId: number, public apiHash: string, public session?: string) {}
 
@@ -25,16 +28,24 @@ class FakeGateway implements TelegramGateway {
     if (pw !== 'rahasia') throw new Error('PASSWORD_HASH_INVALID');
   }
   async getMe(): Promise<MeInfo> { return { id: 777, firstName: 'Muse' }; }
-  async ensureCategoryChannel(title: string): Promise<ChannelInfo> {
-    const existing = this.channels.get(title);
+  async ensureDriveGroup(title: string): Promise<DriveGroupInfo> {
+    this.group ??= { groupId: -100_000, title };
+    return this.group;
+  }
+  async ensureTopic(_groupId: number, title: string): Promise<TopicInfo> {
+    const existing = this.topics.get(title);
     if (existing) return existing;
-    const info = { channelId: -100000 - this.channels.size, title };
-    this.channels.set(title, info);
+    const info = { topicId: this.topicId++, title };
+    this.topics.set(title, info);
     return info;
   }
-  async sendFileToChannel(channelId: number, filePath: string, caption: string): Promise<SentFileResult> {
-    this.sent.push({ channelId, filePath, caption });
-    return { messageId: this.msgId++, channelId };
+  async sendFileToTopic(groupId: number, topicId: number, filePath: string, caption: string): Promise<SentFileResult> {
+    this.sent.push({ groupId, topicId, filePath, caption });
+    return { messageId: this.msgId++, groupId };
+  }
+  async downloadFile(_groupId: number, messageId: number, destPath: string): Promise<string> {
+    await writeFile(destPath, `ISI-REMOTE-${messageId}`);
+    return destPath;
   }
   sessionString(): string { return 'session-abc'; }
   destroy(): void { /* no-op */ }
@@ -119,25 +130,63 @@ describe('auth flow', () => {
 });
 
 describe('upload pipeline', () => {
-  it('mengklasifikasi, membuat channel kategori, mencatat, dan mengantre sinkron', async () => {
+  it('mengklasifikasi, membuat grup+topik kategori, mencatat, dan mengantre sinkron', async () => {
     const token = await login();
     const res = await upload(token, 'laporan.pdf', 'application/pdf', 'isi-pdf');
     expect(res.statusCode).toBe(200);
     const { file } = res.json() as { file: { categoryKey: string; name: string; ext: string; messageId: number } };
     expect(file.categoryKey).toBe('dokumen');
     expect(file.ext).toBe('pdf');
-    expect(fake.channels.has('Drive · Dokumen')).toBe(true);
+    expect(fake.group?.title).toBe('Telegram Drive');
+    expect(fake.topics.has('Dokumen')).toBe(true);
 
     const status = await app.inject({ method: 'GET', url: '/sync/status', headers: { authorization: `Bearer ${token}` } });
     expect((status.json() as { pending: number }).pending).toBe(1);
   });
 
-  it('reuse channel kategori yang sudah ada (tidak dobel buat)', async () => {
+  it('mengirim ke topik kategori yang benar dalam grup yang sama (tidak dobel buat topik)', async () => {
     const token = await login();
     await upload(token, 'a.jpg', 'image/jpeg', 'x');
     await upload(token, 'b.jpg', 'image/jpeg', 'y');
-    expect(fake.channels.size).toBe(1);
-    expect(fake.channels.has('Drive · Gambar')).toBe(true);
+    await upload(token, 'c.pdf', 'application/pdf', 'z');
+    expect(fake.topics.size).toBe(2); // Gambar + Dokumen
+    expect(fake.sent).toHaveLength(3);
+    expect(fake.sent.every((s) => s.groupId === fake.group!.groupId)).toBe(true);
+    const topicIds = new Set(fake.sent.map((s) => s.topicId));
+    expect(topicIds.size).toBe(2); // jpg → topik Gambar, pdf → topik Dokumen
+  });
+});
+
+describe('file download', () => {
+  it('stream isi remote dengan disposition attachment (auth header)', async () => {
+    const token = await login();
+    const up = await upload(token, 'laporan.pdf', 'application/pdf', 'isi-asli');
+    const { file } = up.json() as { file: { id: number; messageId: number } };
+
+    const res = await app.inject({ method: 'GET', url: `/files/${file.id}/download`, headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('application/pdf');
+    expect(String(res.headers['content-disposition'])).toContain('attachment');
+    expect(String(res.headers['content-disposition'])).toContain('laporan.pdf');
+    expect(res.body).toBe(`ISI-REMOTE-${file.messageId}`);
+  });
+
+  it('menerima auth lewat ?token= (untuk <img> dan link unduh langsung)', async () => {
+    const token = await login();
+    const up = await upload(token, 'foto.jpg', 'image/jpeg', 'x');
+    const { file } = up.json() as { file: { id: number } };
+
+    const res = await app.inject({ method: 'GET', url: `/files/${file.id}/download?token=${encodeURIComponent(token)}` });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatch(/^ISI-REMOTE-\d+$/);
+  });
+
+  it('file tidak dikenal → 404, tanpa auth → 401', async () => {
+    const token = await login();
+    const missing = await app.inject({ method: 'GET', url: '/files/9999/download', headers: { authorization: `Bearer ${token}` } });
+    expect(missing.statusCode).toBe(404);
+    const noAuth = await app.inject({ method: 'GET', url: '/files/1/download' });
+    expect(noAuth.statusCode).toBe(401);
   });
 });
 

@@ -7,13 +7,15 @@
  */
 import { buildApp } from './app.js';
 import { enqueueSync, getCategoryByKey, insertFile } from './db.js';
-import type { ChannelInfo, MeInfo, SentFileResult, TelegramGateway } from './telegram.js';
+import type { DriveGroupInfo, MeInfo, SentFileResult, TelegramGateway, TopicInfo } from './telegram.js';
 
 const KEY = '1'.repeat(64);
 
 class DemoGateway implements TelegramGateway {
-  private channels = new Map<string, ChannelInfo>();
+  group: DriveGroupInfo | null = null;
+  private topics = new Map<string, TopicInfo>();
   private msg = 1000;
+  private topicId = 10;
 
   async sendCode(): Promise<{ phoneCodeHash: string }> {
     return { phoneCodeHash: 'demo-hash' };
@@ -24,15 +26,24 @@ class DemoGateway implements TelegramGateway {
   }
   async checkPassword(): Promise<void> { /* menerima password apa pun */ }
   async getMe(): Promise<MeInfo> { return { id: 1, firstName: 'Muse', username: 'muse_demo' }; }
-  async ensureCategoryChannel(title: string): Promise<ChannelInfo> {
-    const found = this.channels.get(title);
+  async ensureDriveGroup(title: string): Promise<DriveGroupInfo> {
+    this.group ??= { groupId: -100_000, title };
+    return this.group;
+  }
+  async ensureTopic(_groupId: number, title: string): Promise<TopicInfo> {
+    const found = this.topics.get(title);
     if (found) return found;
-    const info = { channelId: -100_000 - this.channels.size, title };
-    this.channels.set(title, info);
+    const info = { topicId: this.topicId++, title };
+    this.topics.set(title, info);
     return info;
   }
-  async sendFileToChannel(channelId: number): Promise<SentFileResult> {
-    return { messageId: this.msg++, channelId };
+  async sendFileToTopic(groupId: number): Promise<SentFileResult> {
+    return { messageId: this.msg++, groupId };
+  }
+  async downloadFile(_groupId: number, messageId: number, destPath: string): Promise<string> {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(destPath, `DEMO-${messageId}`);
+    return destPath;
   }
   sessionString(): string { return 'demo-session'; }
   destroy(): void { /* no-op */ }

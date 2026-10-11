@@ -12,3 +12,5 @@ web-build/
 data/
 coverage/
 .DS_Store
+.playwright-mcp/
+.design-checks/

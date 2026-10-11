@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import type { Database } from 'better-sqlite3';
 import {
-  initDb, ensureCategories, listCategories, upsertCategoryChannel,
+  initDb, ensureCategories, listCategories, upsertCategoryTopic,
   insertFile, searchFiles, listFiles, enqueueSync, dequeueSyncBatch,
-  markSynced, getSyncStats,
+  markSynced, getSyncStats, saveSession, getSession, getDriveGroup, saveDriveGroup,
 } from '../db.js';
 
 let db: Database;
@@ -29,13 +29,62 @@ describe('initDb + ensureCategories', () => {
   });
 });
 
-describe('upsertCategoryChannel', () => {
-  it('stores channel id and marks ready', () => {
+describe('upsertCategoryTopic', () => {
+  it('stores topic id and marks ready', () => {
     ensureCategories(db);
-    upsertCategoryChannel(db, 'gambar', -100123, 'Drive · Gambar');
+    upsertCategoryTopic(db, 'gambar', 4321, 'Gambar');
     const cat = listCategories(db).find((c) => c.key === 'gambar')!;
-    expect(cat.channelId).toBe(-100123);
+    expect(cat.channelId).toBe(4321);
     expect(cat.state).toBe('ready');
+  });
+});
+
+describe('drive_group singleton', () => {
+  it('saves, reads, and clears the forum group cache', () => {
+    expect(getDriveGroup(db)).toBeUndefined();
+    saveDriveGroup(db, { groupId: -100777, groupTitle: 'Telegram Drive' });
+    expect(getDriveGroup(db)).toEqual({ groupId: -100777, groupTitle: 'Telegram Drive' });
+    saveDriveGroup(db, { groupId: -100888, groupTitle: 'Telegram Drive' });
+    expect(getDriveGroup(db)!.groupId).toBe(-100888);
+  });
+});
+
+describe('migrasi v2 (channel → grup forum)', () => {
+  it('membersihkan data channel lama tapi MEMPERTAHANKAN session (tanpa login ulang)', () => {
+    // 1. Bangun DB "lama" (berisi session + file + referensi channel), paksa user_version=1
+    const tmp = `/tmp/td-mig-${Date.now()}.sqlite`;
+    const old = initDb(tmp);
+    saveSession(old, { apiId: 1, apiHashEnc: 'h', sessionEnc: 's', phone: '+62' });
+    ensureCategories(old);
+    upsertCategoryTopic(old, 'dokumen', 999, 'Drive · Dokumen');
+    const catOld = listCategories(old).find((c) => c.key === 'dokumen')!;
+    const fOld = insertFile(old, { fileUid: 'x', name: 'a.pdf', ext: 'pdf', mime: 'application/pdf', size: 1, uploadedAt: '2026-10-11T00:00:00.000Z', categoryId: catOld.id, channelId: 999, messageId: 2 });
+    enqueueSync(old, fOld.id);
+    old.pragma('user_version = 1'); // simulasi DB sebelum era grup forum
+    old.close();
+
+    // 2. Buka ulang → initDb menjalankan migrasi v2
+    const fresh = initDb(tmp);
+    expect(fresh.pragma('user_version', { simple: true })).toBe(2);
+    expect(getSession(fresh)?.phone).toBe('+62');           // session selamat
+    expect(listFiles(fresh)).toHaveLength(0);               // data channel lama dibersihkan
+    const catNew = listCategories(fresh).find((c) => c.key === 'dokumen')!;
+    expect(catNew.channelId).toBeNull();                    // referensi topik direset
+    expect(catNew.state).toBe('pending_channel');
+    expect(getSyncStats(fresh)).toEqual({ pending: 0, sent: 0 });
+    fresh.close();
+  });
+
+  it('idempoten: user_version=2 tidak menjalankan reset lagi', () => {
+    const tmp = `/tmp/td-mig2-${Date.now()}.sqlite`;
+    const a = initDb(tmp);
+    ensureCategories(a);
+    upsertCategoryTopic(a, 'gambar', 55, 'Gambar');
+    a.close(); // initDb kedua: user_version sudah 2
+    const b = initDb(tmp);
+    expect(b.pragma('user_version', { simple: true })).toBe(2);
+    expect(listCategories(b).find((c) => c.key === 'gambar')!.channelId).toBe(55); // tak direset
+    b.close();
   });
 });
 
