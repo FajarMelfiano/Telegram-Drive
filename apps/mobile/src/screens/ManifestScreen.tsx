@@ -104,6 +104,9 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
               </View>
             )}
           </Pressable>
+          <Pressable onPress={() => router.push('/album')} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
+            <Text style={styles.iconBtnText}>ALBUM</Text>
+          </Pressable>
           <Pressable onPress={() => router.push('/settings')} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
             <Text style={styles.iconBtnText}>SETELAN</Text>
           </Pressable>
