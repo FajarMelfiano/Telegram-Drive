@@ -32,6 +32,13 @@
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "4cd1f7aa-e50d-4a4f-90c1-9e3bbe20d08a"
+      }
+    },
+    "owner": "fajarmelfiano"
   }
 }
