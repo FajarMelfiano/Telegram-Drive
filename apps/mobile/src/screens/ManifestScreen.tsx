@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Text, useWindowDimensions, View,
 } from 'react-native';
+import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import { Inbox, RefreshCw, Upload } from 'lucide-react-native';
 import { Api, ApiError, downloadFile, type CategoryRow, type FileRow } from '../api';
@@ -26,6 +27,7 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
   const [drawer, setDrawer] = useState<FileRow | null>(null);
   const { width } = useWindowDimensions();
   const narrow = width < 720;
+  const router = useRouter();
 
   const load = useCallback(async () => {
     try {
@@ -101,6 +103,9 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
                 <Text style={styles.iconBtnText}>MUAT</Text>
               </View>
             )}
+          </Pressable>
+          <Pressable onPress={() => router.push('/settings')} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
+            <Text style={styles.iconBtnText}>SETELAN</Text>
           </Pressable>
           <Pressable onPress={onLogout} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
             <Text style={styles.iconBtnText}>KELUAR</Text>
