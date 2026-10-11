@@ -18,6 +18,8 @@ import {
   upsertDevice, listDevices, deleteDevice, saveRefreshToken, findRefreshToken,
   revokeRefreshToken, revokeAllTokensForDevice,
   savePairingCode, getPairingCode, claimPairingCode, cleanupExpiredPairing,
+  updateFile, deleteFile, moveFileCategory, logActivity, listActivity, getStats,
+  listAlbums, createAlbum, getAlbum, renameAlbum, deleteAlbum, addToAlbum, removeFromAlbum, listAlbumFiles,
 } from './db.js';
 import { encrypt, decrypt } from './crypto.js';
 import { mapTelegramError, type TelegramFactory, type TelegramGateway, createRealGateway } from './telegram.js';
@@ -466,6 +468,71 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   });
 
   app.get('/sync/status', { preHandler: requireAuth }, async () => getSyncStats(db));
+
+  /** Preview inline (disposition: inline) — dipakai drawer untuk gambar/audio/video/pdf. */
+  app.get('/files/:id/preview', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    const file = getFileById(db, id);
+    if (!file) return reply.code(404).send({ error: 'FILE_NOT_FOUND' });
+    if (file.channelId == null || file.messageId == null) return reply.code(409).send({ error: 'NOT_UPLOADED' });
+    const gateway = await getGateway();
+    if (!gateway) return reply.code(401).send({ error: 'NOT_LOGGED_IN' });
+    const tempPath = join(tmpdir(), `td-prev-${randomUUID()}`);
+    try {
+      await gateway.downloadFile(file.channelId, file.messageId, tempPath);
+      const stream = createReadStream(tempPath);
+      stream.on('close', () => void unlink(tempPath).catch(() => undefined));
+      return reply
+        .header('content-type', file.mime ?? 'application/octet-stream')
+        .header('content-disposition', 'inline')
+        .header('cache-control', 'private, max-age=3600')
+        .send(stream);
+    } catch (err) {
+      await unlink(tempPath).catch(() => undefined);
+      return sendMappedError(reply, err);
+    }
+  });
+
+  /** Rename tampilan &/atau ubah tag file. */
+  app.patch('/files/:id', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    const body = z.object({
+      displayName: z.string().max(300).nullable().optional(),
+      tags: z.array(z.string().min(1).max(40)).max(20).optional(),
+    }).safeParse(req.body);
+    if (!body.success) return reply.code(422).send({ error: 'VALIDATION', details: body.error.issues });
+    const file = getFileById(db, id);
+    if (!file) return reply.code(404).send({ error: 'FILE_NOT_FOUND' });
+    // Nama tampilan kosong/spasi → tolak (pakai null untuk "hapus rename").
+    if (body.data.displayName !== undefined && body.data.displayName !== null && body.data.displayName.trim() === '') {
+      return reply.code(422).send({ error: 'VALIDATION', details: [{ message: 'displayName kosong' }] });
+    }
+    const updated = updateFile(db, id, body.data)!;
+    // Sinkronkan caption Telegram (best-effort — tak memblokir bila gagal).
+    if (body.data.displayName !== undefined && file.channelId != null && file.messageId != null) {
+      const gateway = await getGateway();
+      if (gateway) {
+        await gateway.editCaption(file.channelId, file.messageId, updated.displayName ?? updated.name)
+          .catch(() => undefined);
+      }
+    }
+    logActivity(db, 'file.updated', { id, displayName: updated.displayName, tags: updated.tags });
+    return { file: updated };
+  });
+
+  /** Hapus file dari drive (DB) + hapus pesan Telegram (best-effort). */
+  app.delete('/files/:id', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    const file = getFileById(db, id);
+    if (!file) return reply.code(404).send({ error: 'FILE_NOT_FOUND' });
+    if (file.channelId != null && file.messageId != null) {
+      const gateway = await getGateway();
+      if (gateway) await gateway.deleteMessages(file.channelId, [file.messageId]).catch(() => undefined);
+    }
+    deleteFile(db, id);
+    logActivity(db, 'file.deleted', { id, name: file.name });
+    return { ok: true };
+  });
 
   app.get('/logs.xlsx', { preHandler: requireAuth }, async (req, reply) => {
     const buf = await buildXlsxBuffer(db);

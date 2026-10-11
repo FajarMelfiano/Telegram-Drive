@@ -10,6 +10,8 @@ class FakeGateway implements TelegramGateway {
   group: DriveGroupInfo | null = null;
   topics = new Map<string, TopicInfo>();
   sent: Array<{ groupId: number; topicId: number; filePath: string; caption: string }> = [];
+  deleted: Array<{ groupId: number; messageIds: number[] }> = [];
+  edited: Array<{ groupId: number; messageId: number; caption: string }> = [];
   requireTwoFa = false;
   private msgId = 100;
   private topicId = 10;
@@ -46,6 +48,12 @@ class FakeGateway implements TelegramGateway {
   async downloadFile(_groupId: number, messageId: number, destPath: string): Promise<string> {
     await writeFile(destPath, `ISI-REMOTE-${messageId}`);
     return destPath;
+  }
+  async deleteMessages(groupId: number, messageIds: number[]): Promise<void> {
+    this.deleted.push({ groupId, messageIds });
+  }
+  async editCaption(groupId: number, messageId: number, caption: string): Promise<void> {
+    this.edited.push({ groupId, messageId, caption });
   }
   sessionString(): string { return 'session-abc'; }
   destroy(): void { /* no-op */ }
@@ -317,6 +325,98 @@ describe('file download', () => {
     expect(missing.statusCode).toBe(404);
     const noAuth = await app.inject({ method: 'GET', url: '/files/1/download' });
     expect(noAuth.statusCode).toBe(401);
+  });
+});
+
+describe('preview inline', () => {
+  it('mengembalikan content-disposition inline (bukan attachment)', async () => {
+    const token = await login();
+    const up = await upload(token, 'foto.jpg', 'image/jpeg', 'img-bytes');
+    const { file } = up.json() as { file: { id: number; messageId: number } };
+
+    const res = await app.inject({ method: 'GET', url: `/files/${file.id}/preview`, headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('image/jpeg');
+    expect(String(res.headers['content-disposition'])).toContain('inline');
+    expect(res.body).toBe(`ISI-REMOTE-${file.messageId}`);
+  });
+
+  it('file tidak ada → 404', async () => {
+    const token = await login();
+    const res = await app.inject({ method: 'GET', url: '/files/9999/preview', headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('rename + tag', () => {
+  it('mengubah nama tampilan dan tag; nama asli tak berubah', async () => {
+    const token = await login();
+    const up = await upload(token, 'laporan.pdf', 'application/pdf', 'x');
+    const { file } = up.json() as { file: { id: number; name: string } };
+
+    const res = await app.inject({
+      method: 'PATCH', url: `/files/${file.id}`, headers: { authorization: `Bearer ${token}` },
+      payload: { displayName: 'Laporan Q3 Final', tags: ['penting', 'q3'] },
+    });
+    expect(res.statusCode).toBe(200);
+    const upd = (res.json() as { file: { name: string; displayName: string | null; tags: string[] } }).file;
+    expect(upd.name).toBe('laporan.pdf');         // nama asli tak tersentuh
+    expect(upd.displayName).toBe('Laporan Q3 Final');
+    expect(upd.tags).toEqual(['penting', 'q3']);
+  });
+
+  it('tag bisa dicari lewat search', async () => {
+    const token = await login();
+    const up = await upload(token, 'nota.pdf', 'application/pdf', 'x');
+    const { file } = up.json() as { file: { id: number } };
+    await app.inject({ method: 'PATCH', url: `/files/${file.id}`, headers: { authorization: `Bearer ${token}` }, payload: { tags: ['reimbursement'] } });
+
+    const res = await app.inject({ method: 'GET', url: '/search?q=reimbursement', headers: { authorization: `Bearer ${token}` } });
+    expect((res.json() as { results: unknown[] }).results).toHaveLength(1);
+  });
+
+  it('displayName kosong-spasi → 422; file tak ada → 404', async () => {
+    const token = await login();
+    const up = await upload(token, 'a.pdf', 'application/pdf', 'x');
+    const { file } = up.json() as { file: { id: number } };
+    const bad = await app.inject({ method: 'PATCH', url: `/files/${file.id}`, headers: { authorization: `Bearer ${token}` }, payload: { displayName: '   ' } });
+    expect(bad.statusCode).toBe(422);
+    const missing = await app.inject({ method: 'PATCH', url: '/files/9999', headers: { authorization: `Bearer ${token}` }, payload: { tags: ['x'] } });
+    expect(missing.statusCode).toBe(404);
+  });
+
+  it('menghapus rename dengan null mengembalikan nama asli', async () => {
+    const token = await login();
+    const up = await upload(token, 'dokumen.pdf', 'application/pdf', 'x');
+    const { file } = up.json() as { file: { id: number } };
+    await app.inject({ method: 'PATCH', url: `/files/${file.id}`, headers: { authorization: `Bearer ${token}` }, payload: { displayName: 'Nama Baru' } });
+    const res = await app.inject({ method: 'PATCH', url: `/files/${file.id}`, headers: { authorization: `Bearer ${token}` }, payload: { displayName: null } });
+    expect((res.json() as { file: { displayName: string | null } }).file.displayName).toBeNull();
+  });
+});
+
+describe('hapus file', () => {
+  it('menghapus dari DB dan mengirim delete ke Telegram', async () => {
+    const token = await login();
+    const up = await upload(token, 'buang.pdf', 'application/pdf', 'x');
+    const { file } = up.json() as { file: { id: number; messageId: number; channelId: number } };
+
+    const res = await app.inject({ method: 'DELETE', url: `/files/${file.id}`, headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(200);
+
+    // tak ada lagi di list & tak bisa diunduh
+    const list = await app.inject({ method: 'GET', url: '/files', headers: { authorization: `Bearer ${token}` } });
+    expect((list.json() as { files: Array<{ id: number }> }).files.find((f) => f.id === file.id)).toBeUndefined();
+    const dl = await app.inject({ method: 'GET', url: `/files/${file.id}/download`, headers: { authorization: `Bearer ${token}` } });
+    expect(dl.statusCode).toBe(404);
+    // delete benar-benar dikirim ke gateway
+    expect(fake.deleted.some((d) => d.messageIds.includes(file.messageId))).toBe(true);
+  });
+
+  it('file tak ada → 404', async () => {
+    const token = await login();
+    const res = await app.inject({ method: 'DELETE', url: '/files/9999', headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(404);
   });
 });
 

@@ -45,6 +45,8 @@ class DemoGateway implements TelegramGateway {
     await writeFile(destPath, `DEMO-${messageId}`);
     return destPath;
   }
+  async deleteMessages(): Promise<void> { /* no-op demo */ }
+  async editCaption(): Promise<void> { /* no-op demo */ }
   sessionString(): string { return 'demo-session'; }
   destroy(): void { /* no-op */ }
 }

@@ -100,7 +100,7 @@ CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS sync_queue (
-  file_id INTEGER PRIMARY KEY REFERENCES files(id),
+  file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
   queued_at TEXT NOT NULL,
   sent_at TEXT
 );
@@ -209,6 +209,19 @@ function migrate(db: Db): void {
           INSERT INTO files_fts(files_fts, rowid, name, display_name, tags) VALUES ('delete', old.id, old.name, old.display_name, old.tags);
           INSERT INTO files_fts(rowid, name, display_name, tags) VALUES (new.id, new.name, new.display_name, new.tags);
         END;`);
+      // DB lama punya sync_queue tanpa ON DELETE CASCADE → file tak bisa dihapus
+      // (FOREIGN KEY constraint failed). Bangun ulang tabelnya dengan cascade + bersihkan orphan.
+      db.exec(`
+        DELETE FROM sync_queue WHERE file_id NOT IN (SELECT id FROM files);
+        CREATE TABLE IF NOT EXISTS sync_queue_new (
+          file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+          queued_at TEXT NOT NULL,
+          sent_at TEXT
+        );
+        INSERT INTO sync_queue_new (file_id, queued_at, sent_at)
+          SELECT file_id, queued_at, sent_at FROM sync_queue;
+        DROP TABLE sync_queue;
+        ALTER TABLE sync_queue_new RENAME TO sync_queue;`);
     }
     db.pragma('user_version = 3');
   });
@@ -564,4 +577,109 @@ export function kvGet(db: Db, key: string): string | undefined {
 
 export function kvDelete(db: Db, key: string): void {
   db.prepare('DELETE FROM kv WHERE key = ?').run(key);
+}
+
+// ---- update & hapus file (fitur drive) ----
+
+/** Perbarui nama tampilan dan/atau tag file. Partial: field yang tidak diberikan tak disentuh. */
+export function updateFile(db: Db, id: number, patch: { displayName?: string | null; tags?: string[] }): FileRow | undefined {
+  const sets: string[] = [];
+  const params: Record<string, unknown> = { id };
+  if (patch.displayName !== undefined) { sets.push('display_name = @displayName'); params.displayName = patch.displayName; }
+  if (patch.tags !== undefined) { sets.push('tags = @tags'); params.tags = JSON.stringify(patch.tags); }
+  if (sets.length === 0) return getFileById(db, id);
+  db.prepare(`UPDATE files SET ${sets.join(', ')} WHERE id = @id`).run(params);
+  return getFileById(db, id);
+}
+
+/** Pindahkan file ke kategori lain (by key). */
+export function moveFileCategory(db: Db, id: number, categoryKey: string): FileRow | undefined {
+  const cat = getCategoryByKey(db, categoryKey);
+  if (!cat) return undefined;
+  db.prepare('UPDATE files SET category_id = ? WHERE id = ?').run(cat.id, id);
+  return getFileById(db, id);
+}
+
+/** Hapus baris file (FTS + album_files ikut via trigger/ON DELETE CASCADE). */
+export function deleteFile(db: Db, id: number): boolean {
+  const res = db.prepare('DELETE FROM files WHERE id = ?').run(id);
+  return res.changes > 0;
+}
+
+// ---- album ----
+
+export interface AlbumRow { id: number; name: string; createdAt: string; fileCount: number }
+
+export function listAlbums(db: Db): AlbumRow[] {
+  return db.prepare(`
+    SELECT a.id, a.name, a.created_at AS createdAt, COUNT(af.file_id) AS fileCount
+    FROM albums a LEFT JOIN album_files af ON af.album_id = a.id
+    GROUP BY a.id ORDER BY a.created_at DESC
+  `).all() as AlbumRow[];
+}
+
+export function createAlbum(db: Db, name: string): AlbumRow {
+  const res = db.prepare('INSERT INTO albums (name, created_at) VALUES (?, ?)').run(name, new Date().toISOString());
+  return { id: Number(res.lastInsertRowid), name, createdAt: new Date().toISOString(), fileCount: 0 };
+}
+
+export function getAlbum(db: Db, id: number): AlbumRow | undefined {
+  return listAlbums(db).find((a) => a.id === id);
+}
+
+export function renameAlbum(db: Db, id: number, name: string): void {
+  db.prepare('UPDATE albums SET name = ? WHERE id = ?').run(name, id);
+}
+
+export function deleteAlbum(db: Db, id: number): boolean {
+  return db.prepare('DELETE FROM albums WHERE id = ?').run(id).changes > 0;
+}
+
+export function addToAlbum(db: Db, albumId: number, fileIds: number[]): number {
+  const maxPos = (db.prepare('SELECT COALESCE(MAX(position), -1) AS m FROM album_files WHERE album_id = ?').get(albumId) as { m: number }).m;
+  const insert = db.prepare('INSERT OR IGNORE INTO album_files (album_id, file_id, position) VALUES (?, ?, ?)');
+  let added = 0;
+  let pos = maxPos + 1;
+  for (const fid of fileIds) {
+    const r = insert.run(albumId, fid, pos);
+    if (r.changes > 0) { added++; pos++; }
+  }
+  return added;
+}
+
+export function removeFromAlbum(db: Db, albumId: number, fileId: number): boolean {
+  return db.prepare('DELETE FROM album_files WHERE album_id = ? AND file_id = ?').run(albumId, fileId).changes > 0;
+}
+
+export function listAlbumFiles(db: Db, albumId: number): FileRow[] {
+  return (db.prepare(`
+    SELECT f.*, c.key AS categoryKey FROM album_files af
+    JOIN files f ON f.id = af.file_id JOIN categories c ON c.id = f.category_id
+    WHERE af.album_id = ? ORDER BY af.position
+  `).all(albumId) as RawFileRow[]).map(mapFileRow);
+}
+
+// ---- statistik ----
+
+export interface StatsResult {
+  totalFiles: number;
+  totalBytes: number;
+  byCategory: Array<{ key: string; label: string; count: number; bytes: number }>;
+  byExt: Array<{ ext: string; count: number; bytes: number }>;
+  bySource: Array<{ source: string; count: number }>;
+}
+
+export function getStats(db: Db): StatsResult {
+  const totals = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS b FROM files').get() as { n: number; b: number };
+  const byCategory = db.prepare(`
+    SELECT c.key, c.label, COUNT(f.id) AS count, COALESCE(SUM(f.size), 0) AS bytes
+    FROM categories c LEFT JOIN files f ON f.category_id = c.id
+    GROUP BY c.id HAVING count > 0 ORDER BY bytes DESC
+  `).all() as StatsResult['byCategory'];
+  const byExt = db.prepare(`
+    SELECT COALESCE(ext, 'lainnya') AS ext, COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes
+    FROM files GROUP BY COALESCE(ext, 'lainnya') ORDER BY bytes DESC LIMIT 20
+  `).all() as StatsResult['byExt'];
+  const bySource = db.prepare('SELECT source, COUNT(*) AS count FROM files GROUP BY source').all() as StatsResult['bySource'];
+  return { totalFiles: totals.n, totalBytes: totals.b, byCategory, byExt, bySource };
 }

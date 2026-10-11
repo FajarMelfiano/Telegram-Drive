@@ -31,6 +31,10 @@ export interface TelegramGateway {
   sendFileToTopic(groupId: number, topicId: number, filePath: string, caption: string): Promise<SentFileResult>;
   /** Unduh media pesan dari Telegram ke path tujuan; mengembalikan path hasil. */
   downloadFile(groupId: number, messageId: number, destPath: string): Promise<string>;
+  /** Hapus pesan (bila ada) dari grup — dipakai saat file dihapus dari drive. */
+  deleteMessages(groupId: number, messageIds: number[]): Promise<void>;
+  /** Ganti caption pesan (rename tampilan) — best-effort, boleh gagal tanpa error fatal. */
+  editCaption(groupId: number, messageId: number, caption: string): Promise<void>;
   sessionString(): string;
   destroy(): void;
 }
@@ -182,6 +186,19 @@ export class TeleprotoGateway implements TelegramGateway {
       return destPath;
     }
     throw new Error('MEDIA_EMPTY');
+  }
+
+  /** Hapus pesan dari grup. Best-effort: pesan yang sudah hilang diabaikan. */
+  async deleteMessages(groupId: number, messageIds: number[]): Promise<void> {
+    if (messageIds.length === 0) return;
+    const markedId = -(1_000_000_000_000 + groupId);
+    await this.client.deleteMessages(markedId, messageIds, { revoke: true });
+  }
+
+  /** Ganti caption pesan (rename tampilan). */
+  async editCaption(groupId: number, messageId: number, caption: string): Promise<void> {
+    const markedId = -(1_000_000_000_000 + groupId);
+    await this.client.editMessage(markedId, { message: messageId, text: caption });
   }
 
   sessionString(): string {
