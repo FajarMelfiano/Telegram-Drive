@@ -420,6 +420,116 @@ describe('hapus file', () => {
   });
 });
 
+describe('pindah kategori', () => {
+  it('mengirim salinan ke topik baru dulu, lalu menghapus pesan lama & memindahkan baris DB', async () => {
+    const token = await login();
+    const up = await upload(token, 'foto-liburan.jpg', 'image/jpeg', 'img');
+    const { file } = up.json() as { file: { id: number; messageId: number; channelId: number; categoryKey: string } };
+    expect(file.categoryKey).toBe('gambar');
+    const sentBefore = fake.sent.length;
+
+    const res = await app.inject({
+      method: 'PATCH', url: `/files/${file.id}/category`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { category: 'arsip' },
+    });
+    expect(res.statusCode).toBe(200);
+    const upd = (res.json() as { file: { categoryKey: string; messageId: number; channelId: number } }).file;
+    expect(upd.categoryKey).toBe('arsip');
+    // salinan baru terkirim (pesan baru ≠ pesan lama) dan pesan lama dihapus
+    expect(fake.sent.length).toBe(sentBefore + 1);
+    expect(upd.messageId).not.toBe(file.messageId);
+    expect(fake.deleted.some((d) => d.messageIds.includes(file.messageId))).toBe(true);
+    // tampil di list dengan kategori baru
+    const list = await app.inject({ method: 'GET', url: '/files', headers: { authorization: `Bearer ${token}` } });
+    const row = (list.json() as { files: Array<{ id: number; categoryKey: string }> }).files.find((f) => f.id === file.id);
+    expect(row?.categoryKey).toBe('arsip');
+  });
+
+  it('kategori sama → no-op (tanpa kirim ulang); kategori tak dikenal → 404; file tak ada → 404', async () => {
+    const token = await login();
+    const up = await upload(token, 'dok.pdf', 'application/pdf', 'x');
+    const { file } = up.json() as { file: { id: number } };
+    const sentBefore = fake.sent.length;
+
+    const same = await app.inject({ method: 'PATCH', url: `/files/${file.id}/category`, headers: { authorization: `Bearer ${token}` }, payload: { category: 'dokumen' } });
+    expect(same.statusCode).toBe(200);
+    expect(fake.sent.length).toBe(sentBefore); // tidak ada kirim ulang
+
+    const badCat = await app.inject({ method: 'PATCH', url: `/files/${file.id}/category`, headers: { authorization: `Bearer ${token}` }, payload: { category: 'tidak-ada' } });
+    expect(badCat.statusCode).toBe(404);
+    const missing = await app.inject({ method: 'PATCH', url: '/files/9999/category', headers: { authorization: `Bearer ${token}` }, payload: { category: 'arsip' } });
+    expect(missing.statusCode).toBe(404);
+  });
+});
+
+describe('aksi massal (batch)', () => {
+  it('tag massal: semua id dapat tag baru', async () => {
+    const token = await login();
+    const a = (await upload(token, 'a.pdf', 'application/pdf', 'x')).json() as { file: { id: number } };
+    const b = (await upload(token, 'b.pdf', 'application/pdf', 'x')).json() as { file: { id: number } };
+
+    const res = await app.inject({ method: 'POST', url: '/files/batch', headers: { authorization: `Bearer ${token}` }, payload: { action: 'tag', ids: [a.file.id, b.file.id], tags: ['arsip-2026'] } });
+    expect(res.statusCode).toBe(200);
+    const { results } = res.json() as { results: Array<{ id: number; ok: boolean }> };
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => r.ok)).toBe(true);
+
+    const search = await app.inject({ method: 'GET', url: '/search?q=arsip-2026', headers: { authorization: `Bearer ${token}` } });
+    expect((search.json() as { results: unknown[] }).results).toHaveLength(2);
+  });
+
+  it('hapus massal: id duplikat diringkas, id tak dikenal dilaporkan per-id, id valid tetap terhapus', async () => {
+    const token = await login();
+    const a = (await upload(token, 'x1.pdf', 'application/pdf', 'x')).json() as { file: { id: number } };
+    const b = (await upload(token, 'x2.pdf', 'application/pdf', 'x')).json() as { file: { id: number } };
+
+    const res = await app.inject({ method: 'POST', url: '/files/batch', headers: { authorization: `Bearer ${token}` }, payload: { action: 'delete', ids: [a.file.id, a.file.id, 99999] } });
+    expect(res.statusCode).toBe(200);
+    const { results } = res.json() as { results: Array<{ id: number; ok: boolean; error?: string }> };
+    // duplikat diringkas → hanya 2 entri (a + 99999)
+    expect(results).toHaveLength(2);
+    expect(results.find((r) => r.id === a.file.id)?.ok).toBe(true);
+    expect(results.find((r) => r.id === 99999)?.error).toBe('FILE_NOT_FOUND');
+
+    const list = await app.inject({ method: 'GET', url: '/files', headers: { authorization: `Bearer ${token}` } });
+    const files = (list.json() as { files: Array<{ id: number }> }).files;
+    expect(files.find((f) => f.id === a.file.id)).toBeUndefined();
+    expect(files.find((f) => f.id === b.file.id)).toBeTruthy(); // tidak tersentuh
+  });
+
+  it('pindah massal: tiap id pindah sendiri; salah satu gagal tak menggagalkan yang lain', async () => {
+    const token = await login();
+    const a = (await upload(token, 'm1.pdf', 'application/pdf', 'x')).json() as { file: { id: number } };
+    const b = (await upload(token, 'm2.pdf', 'application/pdf', 'x')).json() as { file: { id: number } };
+
+    const res = await app.inject({ method: 'POST', url: '/files/batch', headers: { authorization: `Bearer ${token}` }, payload: { action: 'move', ids: [a.file.id, b.file.id, 99999], category: 'arsip' } });
+    expect(res.statusCode).toBe(200);
+    const { results } = res.json() as { results: Array<{ id: number; ok: boolean; error?: string }> };
+    expect(results.find((r) => r.id === a.file.id)?.ok).toBe(true);
+    expect(results.find((r) => r.id === b.file.id)?.ok).toBe(true);
+    expect(results.find((r) => r.id === 99999)?.error).toBe('FILE_NOT_FOUND');
+
+    const list = await app.inject({ method: 'GET', url: '/files', headers: { authorization: `Bearer ${token}` } });
+    const moved = (list.json() as { files: Array<{ id: number; categoryKey: string }> }).files.filter((f) => f.id === a.file.id || f.id === b.file.id);
+    expect(moved.every((f) => f.categoryKey === 'arsip')).toBe(true);
+  });
+
+  it('validasi: move tanpa category → 422, tag tanpa tags → 422, ids kosong → 422, action tak dikenal → 422, tanpa auth → 401', async () => {
+    const token = await login();
+    const noCat = await app.inject({ method: 'POST', url: '/files/batch', headers: { authorization: `Bearer ${token}` }, payload: { action: 'move', ids: [1] } });
+    expect(noCat.statusCode).toBe(422);
+    const noTags = await app.inject({ method: 'POST', url: '/files/batch', headers: { authorization: `Bearer ${token}` }, payload: { action: 'tag', ids: [1] } });
+    expect(noTags.statusCode).toBe(422);
+    const empty = await app.inject({ method: 'POST', url: '/files/batch', headers: { authorization: `Bearer ${token}` }, payload: { action: 'delete', ids: [] } });
+    expect(empty.statusCode).toBe(422);
+    const badAction = await app.inject({ method: 'POST', url: '/files/batch', headers: { authorization: `Bearer ${token}` }, payload: { action: 'explode', ids: [1] } });
+    expect(badAction.statusCode).toBe(422);
+    const noAuth = await app.inject({ method: 'POST', url: '/files/batch', payload: { action: 'delete', ids: [1] } });
+    expect(noAuth.statusCode).toBe(401);
+  });
+});
+
 describe('search', () => {
   it('parser + FTS menemukan file yang baru diupload', async () => {
     const token = await login();

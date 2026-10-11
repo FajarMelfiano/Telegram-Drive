@@ -534,6 +534,96 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     return { ok: true };
   });
 
+  /**
+   * Pindahkan file ke kategori lain. Strategi "aman": kirim salinan ke topik
+   * baru dulu; hanya hapus pesan lama & update DB setelah kirim sukses.
+   * Kalau gagal di tengah, file lama tetap utuh (tak pernah kehilangan file).
+   */
+  app.patch('/files/:id/category', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(req.params);
+    const body = z.object({ category: z.string().min(1) }).safeParse(req.body);
+    if (!body.success) return reply.code(422).send({ error: 'VALIDATION' });
+    const file = getFileById(db, id);
+    if (!file) return reply.code(404).send({ error: 'FILE_NOT_FOUND' });
+    const cat = getCategoryByKey(db, body.data.category);
+    if (!cat) return reply.code(404).send({ error: 'CATEGORY_NOT_FOUND' });
+    if (file.channelId == null || file.messageId == null) return reply.code(409).send({ error: 'NOT_UPLOADED' });
+    if (cat.id === file.categoryId) return { file }; // sudah di kategori itu
+    const gateway = await getGateway();
+    if (!gateway) return reply.code(401).send({ error: 'NOT_LOGGED_IN' });
+
+    const tempPath = join(tmpdir(), `td-move-${randomUUID()}`);
+    try {
+      await gateway.downloadFile(file.channelId, file.messageId, tempPath);
+      const dest = await sendToCategory(gateway, cat.key, cat.label, tempPath, file.name);
+      // salinan sudah aman → hapus pesan lama (best-effort) lalu pindahkan baris DB
+      await gateway.deleteMessages(file.channelId, [file.messageId]).catch(() => undefined);
+      const updated = moveFileCategory(db, id, cat.key, { channelId: dest.groupId, messageId: dest.messageId })!;
+      logActivity(db, 'file.moved', { id, to: cat.key });
+      return { file: updated };
+    } catch (err) {
+      return sendMappedError(reply, err);
+    } finally {
+      await unlink(tempPath).catch(() => undefined);
+    }
+  });
+
+  /**
+   * Aksi massal. Jalan serial, hasil per-id (satu gagal tak menggagalkan lain).
+   * action: delete | move | tag
+   */
+  app.post('/files/batch', { preHandler: requireAuth }, async (req, reply) => {
+    const body = z.object({
+      action: z.enum(['delete', 'move', 'tag']),
+      ids: z.array(z.number().int().positive()).min(1).max(50),
+      category: z.string().optional(),
+      tags: z.array(z.string().min(1).max(40)).max(20).optional(),
+    }).safeParse(req.body);
+    if (!body.success) return reply.code(422).send({ error: 'VALIDATION', details: body.error.issues });
+    const { action, ids } = body.data;
+    if (action === 'move' && !body.data.category) return reply.code(422).send({ error: 'VALIDATION', details: [{ message: 'move butuh category' }] });
+    if (action === 'tag' && !body.data.tags) return reply.code(422).send({ error: 'VALIDATION', details: [{ message: 'tag butuh tags' }] });
+
+    const gateway = await getGateway();
+    const results: Array<{ id: number; ok: boolean; error?: string }> = [];
+    for (const id of [...new Set(ids)]) {
+      const file = getFileById(db, id);
+      if (!file) { results.push({ id, ok: false, error: 'FILE_NOT_FOUND' }); continue; }
+      try {
+        if (action === 'delete') {
+          if (gateway && file.channelId != null && file.messageId != null) {
+            await gateway.deleteMessages(file.channelId, [file.messageId]).catch(() => undefined);
+          }
+          deleteFile(db, id);
+          logActivity(db, 'file.deleted', { id, name: file.name });
+        } else if (action === 'move') {
+          const cat = getCategoryByKey(db, body.data.category!)!;
+          if (!gateway) { results.push({ id, ok: false, error: 'NOT_LOGGED_IN' }); continue; }
+          if (file.channelId == null || file.messageId == null) { results.push({ id, ok: false, error: 'NOT_UPLOADED' }); continue; }
+          if (cat.id === file.categoryId) { results.push({ id, ok: true }); continue; }
+          const tempPath = join(tmpdir(), `td-bmove-${randomUUID()}`);
+          try {
+            await gateway.downloadFile(file.channelId, file.messageId, tempPath);
+            const dest = await sendToCategory(gateway, cat.key, cat.label, tempPath, file.name);
+            await gateway.deleteMessages(file.channelId, [file.messageId]).catch(() => undefined);
+            moveFileCategory(db, id, cat.key, { channelId: dest.groupId, messageId: dest.messageId });
+            logActivity(db, 'file.moved', { id, to: cat.key });
+          } finally {
+            await unlink(tempPath).catch(() => undefined);
+          }
+        } else if (action === 'tag') {
+          updateFile(db, id, { tags: body.data.tags! });
+          logActivity(db, 'file.updated', { id, tags: body.data.tags });
+        }
+        results.push({ id, ok: true });
+      } catch (err) {
+        const mapped = mapTelegramError(err);
+        results.push({ id, ok: false, error: mapped.code });
+      }
+    }
+    return { results };
+  });
+
   app.get('/logs.xlsx', { preHandler: requireAuth }, async (req, reply) => {
     const buf = await buildXlsxBuffer(db);
     return reply

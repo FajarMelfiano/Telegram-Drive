@@ -592,11 +592,19 @@ export function updateFile(db: Db, id: number, patch: { displayName?: string | n
   return getFileById(db, id);
 }
 
-/** Pindahkan file ke kategori lain (by key). */
-export function moveFileCategory(db: Db, id: number, categoryKey: string): FileRow | undefined {
+/**
+ * Pindahkan file ke kategori lain (by key). `newLoc` = lokasi salinan yang baru
+ * dikirim (channel+pesan topik tujuan) — WAJIB diisi setelah kirim sukses supaya
+ * DB tidak lagi menunjuk pesan lama yang sudah dihapus.
+ */
+export function moveFileCategory(
+  db: Db, id: number, categoryKey: string,
+  newLoc?: { channelId: number; messageId: number },
+): FileRow | undefined {
   const cat = getCategoryByKey(db, categoryKey);
   if (!cat) return undefined;
-  db.prepare('UPDATE files SET category_id = ? WHERE id = ?').run(cat.id, id);
+  db.prepare('UPDATE files SET category_id = ?, channel_id = ?, message_id = ? WHERE id = ?')
+    .run(cat.id, newLoc?.channelId ?? null, newLoc?.messageId ?? null, id);
   return getFileById(db, id);
 }
 
