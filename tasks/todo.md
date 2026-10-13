@@ -83,3 +83,10 @@
 ## Phase J: Verifikasi & APK
 - [x] Checkpoint KJ: typecheck+test+lint+export+Playwright e2e+curl+WA live (server 89 tests OK, mobile tsc/lint OK, web export dist/ OK)
 - [x] Task 30: build APK debug lokal (berhasil: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk)
+
+## Phase K: APK self-contained (port P3 server → mobile) (2026-10-13)
+- [x] Task 31: port penuh server → `apps/mobile/src/tg/` (localApi + adapter expo-sqlite + polyfill/stub Metro) — commit `8ea77c7`; D4: tsc 0 (dari 61), lint 0, 109 test workspace hijau, export android exit 0
+- [x] Task 32: fix transport MTProto wajib WebSocket (`networkSocket: PromisedWebSockets`, default teleproto = TCP → kena stub `net`) — commit `4188347`
+- [x] Live login emulator: API ID/hash/phone → OTP terkirim (DC 5) → **verifikasi OTP sukses → MANIFEST tampil (MELFANO)**
+- [x] Task 33: akar bug "Gagal memuat … datatype mismatch" — adapter `sqlite.ts` memanggil `executeSync(params, asArray)` (2 argumen); `normalizeParams` expo mengartikan ≥2 argumen sebagai variadik → index 1 ← seluruh objek/array (TEXT), index 2 ← boolean, param asli tak terikat → `LIMIT ?` menerima TEXT → SQLITE_MISMATCH. Bug laten kedua: key named tanpa prefix (`apiId` vs `@apiId`) tak cocok di `sqlite3_bind_parameter_index` (SQLite exact-match; better-sqlite3 normalkan sendiri, expo tidak)
+- [ ] Fix: `executeSync` satu argumen (objek=named, array=posisional) + `prefixNamed()` dari SQL — tsc 0 + lint 0; menunggu build EAS #3 → uji live ulang (manifest, kategori, unggah, search, kill-app-reopen)

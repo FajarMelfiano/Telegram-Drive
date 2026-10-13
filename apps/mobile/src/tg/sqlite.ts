@@ -14,8 +14,9 @@ import { openDatabaseSync } from 'expo-sqlite';
  *                                   objek named (@x / $x / :x)
  *
  * Ketidakcocokan yang disamarkan di sini:
- *   - better-sqlite3 .all(params) menerima objek; expo-sqlite memisah bind
- *     primitif vs blob, lalu menentukan array-vs-object lewat argumen terpisah.
+ *   - better-sqlite3 .all(params) menerima objek; expo-sqlite menurunkan
+ *     mode bind dari SATU argumen executeSync (objek=named, array=posisional)
+ *     dan menormalisasi boolean/undefined/blob sendiri.
  *   - better-sqlite3 .run() mengembalikan { changes, lastInsertRowid } (kecil);
  *     expo-sqlite mengembalikan { changes, lastInsertRowId } (besar) sekaligus
  *     objek iterator hasil yang harus di-finalize agar tidak bocor statement.
@@ -38,19 +39,48 @@ function isNamedParams(v: unknown): v is NamedParams {
 }
 
 /**
- * Pecah binding campuran (posisional/variadik/named/tanpa-argumen) menjadi
- * (paramsUntukExpo, haruskahLewatSebagaiArray) yang dipahami expo-sqlite.
+ * Prefix key named sesuai placeholder di SQL (@x / :x / $x).
+ *
+ * SQLite mentah (sqlite3_bind_parameter_index) melakukan pencocokan exact
+ * dengan prefix — key polos "apiId" TIDAK cocok dengan "@apiId" dan bind
+ * dilewati diam-diam (index 0). better-sqlite3 menormalkan sendiri; expo-sqlite
+ * tidak, jadi normalisasi dilakukan di adapter ini.
  */
-function toBindArgs(args: unknown[]): [Record<string, unknown> | unknown[], boolean] {
-  if (args.length === 0) return [{}, false];
+function prefixNamed(sql: string, obj: NamedParams): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (/^[@:$]/.test(k)) {
+      out[k] = v; // sudah ber-prefix — lewat apa adanya
+      continue;
+    }
+    const m = sql.match(new RegExp(`[@:$]${k}(?![A-Za-z0-9_])`));
+    out[m ? m[0] : k] = v;
+  }
+  return out;
+}
+
+/**
+ * Susun binding menjadi SATU argumen tunggal untuk `executeSync` — expo-sqlite
+ * menurunkan mode array-vs-named dari bentuk argumen tunggal ini:
+ *   - objek        → named (kunci sudah di-prefix SQL lewat prefixNamed)
+ *   - array        → posisional (index 0, 1, 2, …)
+ *   - tanpa argumen→ [] (tak ada bind)
+ *
+ * PENTING: memanggil executeSync dengan DUA argumen (params, asArray) DILARANG —
+ * normalizeParams mengartikan ≥2 argumen sebagai nilai variadik, sehingga seluruh
+ * objek params ikut terikat sebagai bind value (index 1 ← objek/array aneh,
+ * index 2 ← boolean) dan LIMIT/OFFSET menerima TEXT → SQLITE_MISMATCH
+ * "datatype mismatch".
+ */
+function toBindParam(sql: string, args: unknown[]): unknown {
+  if (args.length === 0) return [];
   if (args.length === 1) {
     const a = args[0];
-    if (isNamedParams(a)) return [a, false];
-    if (Array.isArray(a)) return [a as unknown[], true];
-    return [{ 0: a } as Record<string, unknown>, false];
+    if (Array.isArray(a)) return a;
+    if (isNamedParams(a)) return prefixNamed(sql, a);
+    return [a]; // primitif tunggal → posisional index 0
   }
-  // Variadik posisional: .all(a, b, c) — salin apa adanya.
-  return [args as unknown[], true];
+  return args; // Variadik posisional: .all(a, b, c)
 }
 
 export class Statement {
@@ -61,16 +91,16 @@ export class Statement {
 
   /** Jalankan statement; finalisasi cursor hasil agar statement siap dipakai ulang. */
   private exec(args: unknown[]): { changes: number; lastInsertRowid: number | bigint; rows?: unknown[] } {
-    const [params, asArray] = toBindArgs(args);
+    const param = toBindParam(this.sql, args);
     const res = (this.db.native as { prepareSync(s: string): unknown }).prepareSync(this.sql) as unknown as {
-      executeSync(p: unknown, a: boolean): {
+      executeSync(p: unknown): {
         changes: number;
         lastInsertRowId: number;
         getAllSync(): unknown[];
       };
     };
     try {
-      const exec = res.executeSync(params, asArray);
+      const exec = res.executeSync(param);
       let rows: unknown[] = [];
       try {
         rows = exec.getAllSync();
@@ -123,11 +153,11 @@ export class Database {
   pragma(source: string, opts?: { simple?: boolean }): unknown {
     const sql = `PRAGMA ${source}`;
     const r = (this.raw as { prepareSync(s: string): unknown }).prepareSync(sql) as unknown as {
-      executeSync(p: unknown, a: boolean): { getAllSync(): unknown[] };
+      executeSync(p: unknown): { getAllSync(): unknown[] };
       finalizeSync(): void;
     };
     try {
-      const exec = r.executeSync({}, false);
+      const exec = r.executeSync([]);
       const rows = exec.getAllSync();
       if (opts?.simple) {
         // PRAGMA tunggal-kolom: ambil nilai kolom pertama baris pertama.
