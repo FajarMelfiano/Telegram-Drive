@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "build": "npm run build -w @td/shared && npm run build -w @td/server",
+  "postinstall": "npm run build -w @td/shared",
     "test": "npm test -ws --if-present",
     "typecheck": "npm run typecheck -ws --if-present"
   },

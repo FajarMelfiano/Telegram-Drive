@@ -4,7 +4,7 @@ import {
   ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { Check, Download, ExternalLink, FolderInput, Plus, Tag, Trash2, X } from 'lucide-react-native';
-import { Api, ApiError, fileDownloadUrl, type CategoryRow, type FileRow } from '../api';
+import { Api, ApiError, usePreviewUri, type CategoryRow, type FileRow } from '../api';
 import { glyphFor, tinted } from '../fileType';
 import { color, font, fontSize, radius, space, stateColor } from '../theme';
 
@@ -51,6 +51,9 @@ export function FileDrawer({
   const [showMove, setShowMove] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Hook dipanggil sebelum early-return (rules of hooks): aktif hanya untuk
+  // file gambar ber-channel agar tidak mengunduh file non-gambar percuma.
+  const previewUri = usePreviewUri(file, token, !!file && glyphFor(file.ext).image && file.channelId != null);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   // Sinkronkan state lokal saat file berganti (drawer dipakai ulang) — reset
@@ -162,7 +165,7 @@ export function FileDrawer({
 
           <ScrollView style={styles.body} bounces={false}>
             {glyph.image && file.channelId != null ? (
-              <Image source={{ uri: fileDownloadUrl(file, token) }} style={styles.previewImg} resizeMode="contain" />
+              <Image source={{ uri: previewUri }} style={styles.previewImg} resizeMode="contain" />
             ) : (
               <View style={styles.previewBox}>
                 <glyph.Icon size={56} strokeWidth={1} color={glyph.color} />

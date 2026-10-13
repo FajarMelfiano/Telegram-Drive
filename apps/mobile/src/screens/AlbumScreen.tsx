@@ -4,7 +4,7 @@ import {
   StyleSheet, Text, TextInput, View,
 } from 'react-native';
 import { ArrowLeft, FolderPlus, Images, Plus, Trash2 } from 'lucide-react-native';
-import { Api, ApiError, fileDownloadUrl, type AlbumRow, type FileRow } from '../api';
+import { Api, ApiError, usePreviewUri, type AlbumRow, type FileRow } from '../api';
 import { glyphFor, tinted } from '../fileType';
 import { color, font, fontSize, radius, space } from '../theme';
 
@@ -13,13 +13,14 @@ function SheetCell({ file, token, onPress }: { file: FileRow; token: string | nu
   const glyph = glyphFor(file.ext);
   const canThumb = glyph.image && file.channelId != null;
   const [fail, setFail] = useState(false);
+  const previewUri = usePreviewUri(file, token, canThumb);
 
   return (
     <Pressable style={styles.cell} onPress={onPress}>
       <View style={[styles.thumb, { backgroundColor: tinted(glyph.color, 0.1), borderColor: color.hairline }]}>
         {canThumb && !fail ? (
           <Image
-            source={{ uri: fileDownloadUrl(file, token) }}
+            source={{ uri: previewUri }}
             style={styles.thumbImg}
             resizeMode="cover"
             onError={() => setFail(true)}

@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { Api, ApiError } from '../api';
 import { PairQrPanel } from '../components/PairQrPanel';
+import type { StoredSession } from '../tg/session';
 import { color, font, fontSize, radius, space } from '../theme';
 
 type Step = 'api' | 'phone' | 'otp' | 'password';
@@ -20,7 +21,7 @@ const ERROR_TEXT: Record<string, string> = {
 };
 
 /** Layar masuk: API ID/Hash → nomor → OTP → (opsional) password 2FA. */
-export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string, refreshToken?: string) => void }) {
+export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string, extra?: string | StoredSession) => void }) {
   const [mode, setMode] = useState<Mode>(Platform.OS === 'web' ? 'form' : 'form');
   const [step, setStep] = useState<Step>('api');
   const [apiId, setApiId] = useState('');
@@ -35,6 +36,24 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string, refres
   const showError = (err: unknown) => {
     if (err instanceof ApiError) setError(ERROR_TEXT[err.code] ?? `Gagal (${err.code})`);
     else setError('Server tidak terjangkau. Pastikan server jalan.');
+  };
+
+  /**
+   * Susun StoredSession dari respons login lokal (hanya mode native — web
+   * menyimpan sesi di server via cookie httpOnly, tidak ada session string).
+   */
+  const toStored = (
+    res: { session?: string; apiId?: number; apiHash?: string },
+  ): StoredSession | undefined => {
+    if (res.session == null || res.apiId == null || res.apiHash == null) return undefined;
+    return {
+      apiId: res.apiId,
+      apiHash: res.apiHash,
+      session: res.session,
+      phone: phone.trim(),
+      tgUserId: null,
+      tgName: null,
+    };
   };
 
   const submitApi = async () => {
@@ -52,7 +71,7 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string, refres
     try {
       const res = await Api.verify(requestId, code.trim(), null);
       if (res.status === 'password_required') { setStep('password'); return; }
-      if (res.token) onLoggedIn(res.token, res.refreshToken);
+      if (res.token) onLoggedIn(res.token, toStored(res));
     } catch (err) { showError(err); } finally { setBusy(false); }
   };
 
@@ -61,7 +80,7 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string, refres
     setBusy(true); setError(null);
     try {
       const res = await Api.password(requestId, password, null);
-      onLoggedIn(res.token, res.refreshToken);
+      onLoggedIn(res.token, toStored(res));
     } catch (err) { showError(err); } finally { setBusy(false); }
   };
 

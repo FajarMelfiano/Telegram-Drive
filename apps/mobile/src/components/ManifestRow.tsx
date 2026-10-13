@@ -1,7 +1,7 @@
 import { memo, useState } from 'react';
 import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Download } from 'lucide-react-native';
-import { fileDownloadUrl, type FileRow } from '../api';
+import { usePreviewUri, type FileRow } from '../api';
 import { glyphFor, tinted } from '../fileType';
 import { color, font, fontSize, radius, space, stateColor } from '../theme';
 
@@ -31,12 +31,13 @@ function TypeTile({ file, token, size = 32 }: { file: FileRow; token: string | n
   const glyph = glyphFor(file.ext);
   const canThumb = glyph.image && file.channelId != null && file.messageId != null;
   const [thumbFail, setThumbFail] = useState(false);
+  const previewUri = usePreviewUri(file, token, canThumb);
   const box = { width: size, height: size, borderRadius: radius.control };
 
   if (canThumb && !thumbFail) {
     return (
       <Image
-        source={{ uri: fileDownloadUrl(file, token) }}
+        source={{ uri: previewUri }}
         style={[box, { backgroundColor: color.surfaceAlt }]}
         onError={() => setThumbFail(true)}
         resizeMode="cover"

@@ -10,8 +10,10 @@ export default function LoginRoute() {
 
   return (
     <LoginScreen
-      onLoggedIn={(token, refreshToken) => {
-        void signIn(token, refreshToken).then(() => router.replace('/'));
+      onLoggedIn={(token, extra) => {
+        const refreshToken = typeof extra === 'string' ? extra : undefined;
+        const session = typeof extra === 'string' ? undefined : extra;
+        void signIn(token, refreshToken, session).then(() => router.replace('/'));
       }}
     />
   );

@@ -1,5 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Api, ApiError, clearToken, getToken, setToken, setRefreshToken } from './api';
+import { loadSession as loadLocalSession, unloadSession as unloadLocalSession } from './tg/localApi';
+import {
+  loadSession as loadStoredSession,
+  saveSession as saveStoredSession,
+  deleteSession as deleteStoredSession,
+  type StoredSession,
+} from './tg/session';
 
 type Status = 'loading' | 'signedOut' | 'signedIn';
 
@@ -8,7 +15,8 @@ interface AuthContextValue {
   token: string | null;
   /** Nama tampilan dari Telegram (firstName). */
   me: string;
-  signIn: (token: string, refreshToken?: string) => Promise<void>;
+  /** Login sukses. `session` hanya diisi mode native; web (QR) hanya kirim refreshToken. */
+  signIn: (token: string, refreshToken?: string, session?: StoredSession) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -31,6 +39,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!cancelled) setStatus('signedOut');
         return;
       }
+      // Native: pulihkan sesi Telegram dari SecureStore → hidupkan gateway lokal
+      // dulu, karena Api.me di native memanggil localApi (butuh gateway aktif).
+      const savedSession = await loadStoredSession();
+      if (savedSession) {
+        await loadLocalSession(savedSession.apiId, savedSession.apiHash, savedSession.session)
+          .catch(() => undefined);
+      }
       try {
         const res = await Api.me(stored);
         if (!cancelled) {
@@ -46,9 +61,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => { cancelled = true; };
   }, []);
 
-  const signIn = useCallback(async (next: string, refreshToken?: string) => {
+  const signIn = useCallback(async (next: string, refreshToken?: string, session?: StoredSession) => {
     await setToken(next);
     if (refreshToken) await setRefreshToken(refreshToken);
+    if (session) {
+      // Persistensi: simpan session string + hidupkan gateway lokal.
+      await saveStoredSession(session);
+      await loadLocalSession(session.apiId, session.apiHash, session.session).catch(() => undefined);
+    }
     const res = await Api.me(next);
     setTokenState(next);
     setMe(res.me.firstName);
@@ -57,6 +77,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async () => {
     try { await Api.logout(token); } catch { /* sesi mungkin sudah ditutup server */ }
+    unloadLocalSession();
+    await deleteStoredSession();
     await clearToken();
     setTokenState(null);
     setMe('');

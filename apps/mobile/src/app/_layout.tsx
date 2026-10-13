@@ -1,3 +1,4 @@
+import '../tg/polyfills'; // Buffer + crypto.getRandomValues global — sebelum modul lain
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef } from 'react';
