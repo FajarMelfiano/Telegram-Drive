@@ -3,10 +3,12 @@ import {
   ActivityIndicator, KeyboardAvoidingView, Platform, Pressable,
   ScrollView, StyleSheet, Text, TextInput, View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Api, ApiError } from '../api';
 import { PairQrPanel } from '../components/PairQrPanel';
 import type { StoredSession } from '../tg/session';
-import { color, font, fontSize, radius, space } from '../theme';
+import { color, fontSize, radius, scaleCap, space } from '../theme';
+import { Card, inputStyle, Screen } from '../components/ui';
 
 type Step = 'api' | 'phone' | 'otp' | 'password';
 type Mode = 'form' | 'qr';
@@ -22,6 +24,7 @@ const ERROR_TEXT: Record<string, string> = {
 
 /** Layar masuk: API ID/Hash → nomor → OTP → (opsional) password 2FA. */
 export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string, extra?: string | StoredSession) => void }) {
+  const insets = useSafeAreaInsets();
   const [mode, setMode] = useState<Mode>(Platform.OS === 'web' ? 'form' : 'form');
   const [step, setStep] = useState<Step>('api');
   const [apiId, setApiId] = useState('');
@@ -87,85 +90,141 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: (token: string, extra?
   const stepNo = step === 'api' ? 1 : step === 'phone' ? 2 : step === 'otp' ? 2 : 2;
 
   return (
-    <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        <View style={styles.header}>
-          <Text style={styles.brand}>TELEGRAM DRIVE</Text>
-          <Text style={styles.sub}>GUDANG PRIBADI · MANIFEST OTOMATIS</Text>
-        </View>
+    <Screen>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView
+          contentContainerStyle={[styles.container, { paddingTop: insets.top + space(10), paddingBottom: insets.bottom + space(10) }]}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={styles.header}>
+            <View style={styles.logo}>
+              <Text style={styles.logoText}>TD</Text>
+            </View>
+            <Text style={styles.brand} maxFontSizeMultiplier={scaleCap.title}>Telegram Drive</Text>
+            <Text style={styles.sub} maxFontSizeMultiplier={scaleCap.label}>Gudang pribadi · manifest otomatis</Text>
+          </View>
 
-        {Platform.OS === 'web' && mode === 'qr' ? (
-          <PairQrPanel onLoggedIn={onLoggedIn} onBack={() => setMode('form')} />
-        ) : (
-        <View style={styles.panel}>
-          <Text style={styles.stepLabel}>LANGKAH {stepNo} · {step === 'api' ? 'KREDENSIAL API' : step === 'phone' ? 'NOMOR TELEPON' : step === 'otp' ? 'KODE OTP' : 'PASSWORD 2FA'}</Text>
+          {Platform.OS === 'web' && mode === 'qr' ? (
+            <Card style={styles.panelWide}>
+              <PairQrPanel onLoggedIn={(token) => onLoggedIn(token)} onBack={() => setMode('form')} />
+            </Card>
+          ) : (
+            <Card style={styles.panel}>
+              <Text style={styles.stepLabel} maxFontSizeMultiplier={scaleCap.label}>
+                Langkah {stepNo} · {step === 'api' ? 'Kredensial API' : step === 'phone' ? 'Nomor telepon' : step === 'otp' ? 'Kode OTP' : 'Password 2FA'}
+              </Text>
 
-          {step === 'api' && (
-            <>
-              <Field label="API ID" hint="my.telegram.org → API development tools">
-                <TextInput style={styles.inputMono} value={apiId} onChangeText={setApiId}
-                  keyboardType="number-pad" placeholder="123456" placeholderTextColor={color.textFaint} />
-              </Field>
-              <Field label="API HASH" hint="32 karakter hex — jangan bagikan ke siapa pun">
-                <TextInput style={styles.inputMono} value={apiHash} onChangeText={setApiHash}
-                  autoCapitalize="none" placeholder="a1b2c3…" placeholderTextColor={color.textFaint} secureTextEntry />
-              </Field>
-              <Field label="NOMOR TELEPON" hint="Format internasional, contoh +6281234567890">
-                <TextInput style={styles.inputMono} value={phone} onChangeText={setPhone}
-                  keyboardType="phone-pad" placeholder="+62…" placeholderTextColor={color.textFaint} />
-              </Field>
-              <PrimaryButton label="KIRIM KODE OTP" onPress={submitApi} busy={busy}
-                disabled={!apiId || apiHash.trim().length < 10 || phone.trim().length < 8} />
-            </>
+              {step === 'api' && (
+                <>
+                  <Field label="API ID" hint="my.telegram.org → API development tools">
+                    <TextInput
+                      style={[inputStyle.mono, styles.inputMono]}
+                      value={apiId}
+                      onChangeText={setApiId}
+                      keyboardType="number-pad"
+                      placeholder="123456"
+                      placeholderTextColor={color.textFaint}
+                      maxFontSizeMultiplier={scaleCap.label}
+                    />
+                  </Field>
+                  <Field label="API HASH" hint="32 karakter hex — jangan bagikan ke siapa pun">
+                    <TextInput
+                      style={[inputStyle.mono, styles.inputMono]}
+                      value={apiHash}
+                      onChangeText={setApiHash}
+                      autoCapitalize="none"
+                      placeholder="a1b2c3…"
+                      placeholderTextColor={color.textFaint}
+                      secureTextEntry
+                      maxFontSizeMultiplier={scaleCap.label}
+                    />
+                  </Field>
+                  <Field label="Nomor telepon" hint="Format internasional, contoh +6281234567890">
+                    <TextInput
+                      style={[inputStyle.mono, styles.inputMono]}
+                      value={phone}
+                      onChangeText={setPhone}
+                      keyboardType="phone-pad"
+                      placeholder="+62…"
+                      placeholderTextColor={color.textFaint}
+                      maxFontSizeMultiplier={scaleCap.label}
+                    />
+                  </Field>
+                  <PrimaryButton label="Kirim kode OTP" onPress={submitApi} busy={busy}
+                    disabled={!apiId || apiHash.trim().length < 10 || phone.trim().length < 8} />
+                </>
+              )}
+
+              {step === 'otp' && (
+                <>
+                  <Text style={styles.note} maxFontSizeMultiplier={scaleCap.label}>
+                    Kode dikirim ke {phone} oleh Telegram. Masukkan 5 digit.
+                  </Text>
+                  <Field label="Kode OTP">
+                    <TextInput
+                      style={[inputStyle.mono, styles.inputMonoBig]}
+                      value={code}
+                      onChangeText={setCode}
+                      keyboardType="number-pad"
+                      maxLength={6}
+                      placeholder="·····"
+                      placeholderTextColor={color.textFaint}
+                      maxFontSizeMultiplier={scaleCap.label}
+                    />
+                  </Field>
+                  <PrimaryButton label="Verifikasi" onPress={submitCode} busy={busy} disabled={code.trim().length < 3} />
+                  <GhostButton label="Ganti nomor" onPress={() => { setStep('api'); setError(null); }} />
+                </>
+              )}
+
+              {step === 'password' && (
+                <>
+                  <Text style={styles.note} maxFontSizeMultiplier={scaleCap.label}>
+                    Akun ini memakai two-step verification.
+                  </Text>
+                  <Field label="Password 2FA">
+                    <TextInput
+                      style={[inputStyle.base, styles.inputMono]}
+                      value={password}
+                      onChangeText={setPassword}
+                      secureTextEntry
+                      placeholder="password akun Telegram"
+                      placeholderTextColor={color.textFaint}
+                      maxFontSizeMultiplier={scaleCap.label}
+                    />
+                  </Field>
+                  <PrimaryButton label="Buka gudang" onPress={submitPassword} busy={busy} disabled={password.length < 1} />
+                </>
+              )}
+
+              {error && <Text style={styles.error} maxFontSizeMultiplier={scaleCap.label}>{error}</Text>}
+
+              {Platform.OS === 'web' && step === 'api' && (
+                <Pressable
+                  onPress={() => setMode('qr')}
+                  style={({ pressed }) => [styles.ghost, pressed && { opacity: 0.6 }]}
+                >
+                  <Text style={styles.ghostText} maxFontSizeMultiplier={scaleCap.label}>Pasangkan dengan HP (QR)</Text>
+                </Pressable>
+              )}
+            </Card>
           )}
 
-          {step === 'otp' && (
-            <>
-              <Text style={styles.note}>Kode dikirim ke {phone} oleh Telegram. Masukkan 5 digit.</Text>
-              <Field label="KODE OTP">
-                <TextInput style={styles.inputMonoBig} value={code} onChangeText={setCode}
-                  keyboardType="number-pad" maxLength={6} placeholder="·····" placeholderTextColor={color.textFaint} />
-              </Field>
-              <PrimaryButton label="VERIFIKASI" onPress={submitCode} busy={busy} disabled={code.trim().length < 3} />
-              <GhostButton label="GANTI NOMOR" onPress={() => { setStep('api'); setError(null); }} />
-            </>
-          )}
-
-          {step === 'password' && (
-            <>
-              <Text style={styles.note}>Akun ini memakai two-step verification.</Text>
-              <Field label="PASSWORD 2FA">
-                <TextInput style={styles.input} value={password} onChangeText={setPassword}
-                  secureTextEntry placeholder="password akun Telegram" placeholderTextColor={color.textFaint} />
-              </Field>
-              <PrimaryButton label="BUKA GUDANG" onPress={submitPassword} busy={busy} disabled={password.length < 1} />
-            </>
-          )}
-
-          {error && <Text style={styles.error}>{error}</Text>}
-
-          {Platform.OS === 'web' && step === 'api' && (
-            <Pressable onPress={() => setMode('qr')} style={({ pressed }) => [styles.ghost, pressed && { opacity: 0.6 }]}>
-              <Text style={styles.ghostText}>PASANGKAN DENGAN HP (QR)</Text>
-            </Pressable>
-          )}
-        </View>
-        )}
-
-        <Text style={styles.foot}>
-          Sesi Telegram disimpan terenkripsi di servermu sendiri.{'\n'}API ID/Hash hanya dipakai untuk masuk ke akunmu.
-        </Text>
-      </ScrollView>
-    </KeyboardAvoidingView>
+          <Text style={styles.foot} maxFontSizeMultiplier={scaleCap.label}>
+            {'Sesi Telegram disimpan terenkripsi di servermu sendiri.\nAPI ID/Hash hanya dipakai untuk masuk ke akunmu.'}
+          </Text>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </Screen>
   );
 }
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <View style={styles.field}>
-      <Text style={styles.label}>{label}</Text>
+      <Text style={styles.label} maxFontSizeMultiplier={scaleCap.label}>{label}</Text>
       {children}
-      {hint && <Text style={styles.hint}>{hint}</Text>}
+      {hint && <Text style={styles.hint} maxFontSizeMultiplier={scaleCap.label}>{hint}</Text>}
     </View>
   );
 }
@@ -175,9 +234,12 @@ function PrimaryButton({ label, onPress, busy, disabled }: { label: string; onPr
     <Pressable
       onPress={onPress}
       disabled={disabled || busy}
+      accessibilityRole="button"
       style={({ pressed }) => [styles.primary, (disabled || busy) && styles.primaryDisabled, pressed && !disabled && styles.primaryPressed]}
     >
-      {busy ? <ActivityIndicator color={color.base} /> : <Text style={styles.primaryText}>{label}</Text>}
+      {busy ? <ActivityIndicator color={color.onPrimary} /> : (
+        <Text style={styles.primaryText} maxFontSizeMultiplier={scaleCap.label}>{label}</Text>
+      )}
     </Pressable>
   );
 }
@@ -185,46 +247,40 @@ function PrimaryButton({ label, onPress, busy, disabled }: { label: string; onPr
 function GhostButton({ label, onPress }: { label: string; onPress: () => void }) {
   return (
     <Pressable onPress={onPress} style={({ pressed }) => [styles.ghost, pressed && { opacity: 0.6 }]}>
-      <Text style={styles.ghostText}>{label}</Text>
+      <Text style={styles.ghostText} maxFontSizeMultiplier={scaleCap.label}>{label}</Text>
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  flex: { flex: 1, backgroundColor: color.base },
+  flex: { flex: 1 },
   container: { flexGrow: 1, justifyContent: 'center', padding: space(6), maxWidth: 520, width: '100%', alignSelf: 'center' },
-  header: { marginBottom: space(8) },
-  brand: { color: color.textPrimary, fontSize: fontSize.xxl, fontWeight: '700', letterSpacing: 2 },
-  sub: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber, letterSpacing: 2, marginTop: space(1.5) },
-  panel: { borderWidth: 1, borderColor: color.hairline, backgroundColor: color.surface, padding: space(5) },
-  stepLabel: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 1.5, marginBottom: space(5) },
+  header: { alignItems: 'center', marginBottom: space(8), gap: space(2) },
+  logo: {
+    width: 60, height: 60, borderRadius: 18, backgroundColor: color.primary,
+    alignItems: 'center', justifyContent: 'center', marginBottom: space(2),
+  },
+  logoText: { color: color.onPrimary, fontSize: fontSize.lg, fontWeight: '700' },
+  brand: { color: color.textPrimary, fontSize: fontSize.xl, fontWeight: '700', letterSpacing: -0.3 },
+  sub: { color: color.textMuted, fontSize: fontSize.sm },
+  panel: { padding: space(5), gap: space(2) },
+  panelWide: { padding: space(3) },
+  stepLabel: { color: color.textFaint, fontSize: fontSize.xs, marginBottom: space(4) },
   field: { marginBottom: space(4) },
-  label: { fontSize: fontSize.xs, color: color.textMuted, letterSpacing: 1, marginBottom: space(1.5) },
-  hint: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, marginTop: space(1.5) },
-  input: {
-    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
-    backgroundColor: color.base, color: color.textPrimary, paddingHorizontal: space(3), paddingVertical: space(3), fontSize: fontSize.base,
-  },
-  inputMono: {
-    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
-    backgroundColor: color.base, color: color.textPrimary, paddingHorizontal: space(3), paddingVertical: space(3),
-    fontFamily: font.mono, fontSize: fontSize.base,
-  },
-  inputMonoBig: {
-    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
-    backgroundColor: color.base, color: color.amber, paddingHorizontal: space(3), paddingVertical: space(3),
-    fontFamily: font.mono, fontSize: fontSize.xl, letterSpacing: 8,
-  },
+  label: { fontSize: fontSize.xs, color: color.textMuted, marginBottom: space(1.5) },
+  hint: { fontSize: fontSize.xs, color: color.textFaint, marginTop: space(1.5) },
+  inputMono: { marginTop: 0 },
+  inputMonoBig: { fontSize: fontSize.xl, letterSpacing: 8, textAlign: 'center' },
   note: { color: color.textMuted, fontSize: fontSize.sm, marginBottom: space(4) },
   primary: {
-    backgroundColor: color.amber, borderRadius: radius.control, paddingVertical: space(3.5),
-    alignItems: 'center', marginTop: space(2),
+    backgroundColor: color.primary, borderRadius: radius.container, minHeight: 48,
+    alignItems: 'center', justifyContent: 'center', marginTop: space(2),
   },
-  primaryDisabled: { backgroundColor: color.amberDim },
+  primaryDisabled: { opacity: 0.45 },
   primaryPressed: { opacity: 0.85 },
-  primaryText: { color: color.base, fontWeight: '700', letterSpacing: 1.5, fontSize: fontSize.sm },
-  ghost: { paddingVertical: space(3), alignItems: 'center', marginTop: space(2) },
-  ghostText: { color: color.textMuted, fontSize: fontSize.sm, letterSpacing: 1 },
+  primaryText: { color: color.onPrimary, fontWeight: '700', fontSize: fontSize.base },
+  ghost: { paddingVertical: space(3), alignItems: 'center', marginTop: space(2), minHeight: 44, justifyContent: 'center' },
+  ghostText: { color: color.textMuted, fontSize: fontSize.sm },
   error: { color: color.red, fontSize: fontSize.sm, marginTop: space(4) },
-  foot: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, marginTop: space(8), lineHeight: 18 },
+  foot: { color: color.textFaint, fontSize: fontSize.xs, marginTop: space(8), lineHeight: 18, textAlign: 'center' },
 });

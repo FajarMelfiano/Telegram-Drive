@@ -3,6 +3,7 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef } from 'react';
 import { Platform, StyleSheet, View } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider } from '../auth';
 import { color } from '../theme';
 
@@ -25,21 +26,23 @@ function useWebAntiFringe() {
 export default function RootLayout() {
   const rootRef = useWebAntiFringe();
   return (
-    <AuthProvider>
-      <StatusBar style="light" />
-      <View ref={rootRef} style={styles.root}>
-        <Stack
-          screenOptions={{
-            headerShown: false,
-            contentStyle: { backgroundColor: color.base },
-            animation: 'fade',
-          }}
-        >
-          <Stack.Screen name="(tabs)" />
-          <Stack.Screen name="login" />
-        </Stack>
-      </View>
-    </AuthProvider>
+    <SafeAreaProvider>
+      <AuthProvider>
+        <StatusBar style="dark" />
+        <View ref={rootRef} style={styles.root}>
+          <Stack
+            screenOptions={{
+              headerShown: false,
+              contentStyle: { backgroundColor: color.base },
+              animation: 'fade',
+            }}
+          >
+            <Stack.Screen name="(tabs)" />
+            <Stack.Screen name="login" />
+          </Stack>
+        </View>
+      </AuthProvider>
+    </SafeAreaProvider>
   );
 }
 

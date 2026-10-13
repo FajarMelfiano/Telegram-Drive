@@ -3,14 +3,14 @@ import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Download } from 'lucide-react-native';
 import { usePreviewUri, type FileRow } from '../api';
 import { glyphFor, tinted } from '../fileType';
-import { color, font, fontSize, radius, space, stateColor } from '../theme';
+import { color, font, fontSize, radius, scaleCap, space, stateColor } from '../theme';
 
 const STATUS_LABEL: Record<string, string> = {
-  indexed: 'TERCATAT',
-  synced: 'SINKRON',
-  failed: 'GAGAL',
-  uploading: 'UNGGAH',
-  pending: 'ANTRE',
+  indexed: 'Tercatat',
+  synced: 'Sinkron',
+  failed: 'Gagal',
+  uploading: 'Unggah',
+  pending: 'Antre',
 };
 
 function formatSize(bytes: number): string {
@@ -26,8 +26,8 @@ function formatDate(iso: string): string {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
-/** Tile 32×32: thumbnail asli untuk gambar (dari server), glyph berwarna untuk sisanya. */
-function TypeTile({ file, token, size = 32 }: { file: FileRow; token: string | null; size?: number }) {
+/** Tile 36×36: thumbnail asli untuk gambar (dari server), glyph berwarna untuk sisanya. */
+function TypeTile({ file, token, size = 36 }: { file: FileRow; token: string | null; size?: number }) {
   const glyph = glyphFor(file.ext);
   const canThumb = glyph.image && file.channelId != null && file.messageId != null;
   const [thumbFail, setThumbFail] = useState(false);
@@ -52,8 +52,8 @@ function TypeTile({ file, token, size = 32 }: { file: FileRow; token: string | n
 }
 
 /**
- * Satu baris manifest: nomor urut mono, tile tipe (thumbnail/glyph), nama + meta,
- * pill status, tombol unduh. Ketuk baris → drawer detail (onPress).
+ * Satu baris manifest: tile tipe (thumbnail/glyph), nama + meta, pill status,
+ * tombol unduh. Ketuk baris → drawer detail (onPress); tekan lama → pilih massal.
  */
 export const ManifestRow = memo(function ManifestRow({
   file, index, token, onPress, onDownload, selected, onLongPress,
@@ -71,10 +71,12 @@ export const ManifestRow = memo(function ManifestRow({
       onPress={() => onPress?.(file)}
       onLongPress={() => onLongPress?.(file)}
       delayLongPress={280}
+      accessibilityRole="button"
+      accessibilityLabel={`${file.name}, ${STATUS_LABEL[file.state] ?? file.state}`}
       style={({ pressed }) => [
         styles.row,
         pressed && (onPress || onLongPress) && { backgroundColor: color.surfaceAlt },
-        selected && { backgroundColor: color.surfaceAlt, borderLeftWidth: 2, borderLeftColor: color.amber },
+        selected && { backgroundColor: color.primarySoft, borderColor: color.primary },
       ]}
     >
       {selected != null && (
@@ -82,31 +84,29 @@ export const ManifestRow = memo(function ManifestRow({
           {selected && <Text style={styles.checkMark}>✓</Text>}
         </View>
       )}
-      <Text style={styles.index} numberOfLines={1}>
-        {String(index + 1).padStart(4, '0')}
-      </Text>
       <TypeTile file={file} token={token} />
       <View style={styles.main}>
-        <Text style={styles.name} numberOfLines={1}>
+        <Text style={styles.name} numberOfLines={1} maxFontSizeMultiplier={scaleCap.label}>
           {file.name}
         </Text>
-        <Text style={styles.meta} numberOfLines={1}>
-          {formatSize(file.size)}  ·  {file.categoryKey.toUpperCase()}  ·  {formatDate(file.uploadedAt)}
+        <Text style={styles.meta} numberOfLines={1} maxFontSizeMultiplier={scaleCap.label}>
+          {formatSize(file.size)}  ·  {file.categoryKey}  ·  {formatDate(file.uploadedAt)}
         </Text>
       </View>
-      <View style={[styles.statusPill, { borderColor: stateColor[file.state] ?? color.greyState }]}>
+      <View style={[styles.statusPill, { backgroundColor: tinted(stateColor[file.state] ?? color.greyState, 0.12) }]}>
         <View style={[styles.statusDot, { backgroundColor: stateColor[file.state] ?? color.greyState }]} />
-        <Text style={[styles.statusText, { color: stateColor[file.state] ?? color.greyState }]}>
-          {STATUS_LABEL[file.state] ?? file.state.toUpperCase()}
+        <Text style={[styles.statusText, { color: stateColor[file.state] ?? color.greyState }]} maxFontSizeMultiplier={scaleCap.label}>
+          {STATUS_LABEL[file.state] ?? file.state}
         </Text>
       </View>
       <Pressable
         onPress={() => onDownload?.(file)}
         hitSlop={8}
-        style={({ pressed }) => [styles.dlBtn, pressed && { backgroundColor: color.amber }]}
+        style={({ pressed }) => [styles.dlBtn, pressed && { backgroundColor: color.surfaceAlt }]}
+        accessibilityRole="button"
         accessibilityLabel={`Unduh ${file.name}`}
       >
-        {({ pressed }) => <Download size={15} strokeWidth={1.5} color={pressed ? color.base : color.textMuted} />}
+        <Download size={16} strokeWidth={1.5} color={color.textMuted} />
       </Pressable>
     </Pressable>
   );
@@ -117,35 +117,35 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: space(3),
-    paddingVertical: space(2.5),
-    paddingHorizontal: space(4),
-    borderBottomWidth: 1,
-    borderBottomColor: color.hairline,
+    paddingVertical: space(3),
+    paddingHorizontal: space(3),
+    backgroundColor: color.surface,
+    borderWidth: 1,
+    borderColor: color.hairline,
+    borderRadius: radius.card,
   },
-  index: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, width: 30 },
   checkbox: {
-    width: 18, height: 18, borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
+    width: 20, height: 20, borderWidth: 1.5, borderColor: color.hairline, borderRadius: 6,
     alignItems: 'center', justifyContent: 'center',
   },
-  checkboxOn: { backgroundColor: color.amber, borderColor: color.amber },
-  checkMark: { color: color.base, fontSize: 12, fontWeight: '700' },
+  checkboxOn: { backgroundColor: color.primary, borderColor: color.primary },
+  checkMark: { color: color.onPrimary, fontSize: 12, fontWeight: '700' },
   tile: { alignItems: 'center', justifyContent: 'center', borderWidth: 1 },
   main: { flex: 1, minWidth: 0 },
-  name: { color: color.textPrimary, fontSize: fontSize.base },
+  name: { color: color.textPrimary, fontSize: fontSize.base, fontWeight: '600' },
   meta: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, marginTop: 2 },
   statusPill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: space(1.5),
-    borderWidth: 1,
     borderRadius: radius.chip,
-    paddingHorizontal: space(2),
+    paddingHorizontal: space(2.5),
     paddingVertical: space(1),
   },
   statusDot: { width: 5, height: 5, borderRadius: 3 },
-  statusText: { fontFamily: font.mono, fontSize: fontSize.xs, letterSpacing: 0.5 },
+  statusText: { fontSize: fontSize.xs, fontWeight: '600' },
   dlBtn: {
-    width: 30, height: 30, alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
+    width: 44, height: 44, alignItems: 'center', justifyContent: 'center',
+    borderRadius: radius.control,
   },
 });

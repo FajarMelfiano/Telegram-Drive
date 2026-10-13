@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, Modal, Platform, Pressable, RefreshControl, StyleSheet, Text, useWindowDimensions, View,
+  ActivityIndicator, FlatList, Modal, Platform, Pressable, RefreshControl,
+  StyleSheet, Text, useWindowDimensions, View,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
-import { Inbox, RefreshCw, Upload } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Images, Inbox, Settings, Upload } from 'lucide-react-native';
 import { Api, ApiError, downloadFile, type CategoryRow, type FileRow } from '../api';
 import { ManifestRow } from '../components/ManifestRow';
 import { CategoryRail } from '../components/CategoryRail';
@@ -12,13 +14,17 @@ import { FileDrawer } from '../components/FileDrawer';
 import {
   drainQueue, enqueueUpload, getQueue, removeUpload, retryUpload, type QueueEntry,
 } from '../uploadQueue';
-import { color, font, fontSize, radius, space } from '../theme';
+import { color, fontSize, radius, scaleCap, space } from '../theme';
+import {
+  Btn, Card, EmptyState, Fab, IconBtn, Pill, Screen, ScreenHeader, SectionLabel,
+} from '../components/ui';
 
 /**
  * Manifest — layar utama: rail lorong kategori + daftar baris file
  * + unggah pintar + status sinkron.
  */
-export function ManifestScreen({ token, me, onLogout }: { token: string; me: string; onLogout: () => void }) {
+export function ManifestScreen({ token, me }: { token: string; me: string }) {
+  const insets = useSafeAreaInsets();
   const [files, setFiles] = useState<FileRow[]>([]);
   const [categories, setCategories] = useState<CategoryRow[]>([]);
   const [active, setActive] = useState<string | null>(null);
@@ -33,7 +39,7 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
   const [movePicker, setMovePicker] = useState(false);
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const { width } = useWindowDimensions();
-  const narrow = width < 720;
+  const wide = width >= 640;
   const router = useRouter();
   const selecting = selected.size > 0;
 
@@ -176,81 +182,98 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
     }
   };
 
-  return (
-    <View style={styles.root}>
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.brand}>MANIFEST</Text>
-          <Text style={styles.who}>{me.toUpperCase()} · {files.length} BARIS</Text>
-        </View>
-        <View style={styles.headerRight}>
-          {sync && (
-            <View style={styles.syncChip}>
-              <View style={[styles.dot, { backgroundColor: sync.pending > 0 ? color.amber : color.green }]} />
-              <Text style={styles.syncText}>
-                {sync.pending > 0 ? `ANTRE ${sync.pending}` : `SINKRON ${sync.sent}`}
-              </Text>
-            </View>
-          )}
-          <Pressable onPress={() => void load()} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
-            {({ pressed }) => (
-              <View style={styles.iconBtnInner}>
-                <RefreshCw size={12} strokeWidth={1.5} color={pressed ? color.amber : color.textMuted} />
-                <Text style={styles.iconBtnText}>MUAT</Text>
-              </View>
-            )}
-          </Pressable>
-          <Pressable onPress={() => router.push('/album')} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
-            <Text style={styles.iconBtnText}>ALBUM</Text>
-          </Pressable>
-          <Pressable onPress={() => router.push('/settings')} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
-            <Text style={styles.iconBtnText}>SETELAN</Text>
-          </Pressable>
-          <Pressable onPress={onLogout} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
-            <Text style={styles.iconBtnText}>KELUAR</Text>
-          </Pressable>
-        </View>
-      </View>
+  const dockBottom = Math.max(insets.bottom, 8) + 76;
 
-      <View style={[styles.body, narrow && styles.bodyColumn]}>
-        <View style={[styles.railWrap, narrow ? styles.railWrapNarrow : null]}>
+  return (
+    <Screen>
+      <ScreenHeader
+        title="Manifest"
+        subtitle={`${me} · ${files.length} berkas`}
+        right={(
+          <>
+            {sync && (
+              <Pill
+                text={sync.pending > 0 ? `${sync.pending} antre` : `Sinkron ${sync.sent}`}
+                tint={sync.pending > 0 ? color.amber : color.green}
+                bg={color.onPrimary}
+              />
+            )}
+            <IconBtn
+              label="Album"
+              onPress={() => router.push('/album')}
+              icon={<Images size={20} color={color.onPrimary} />}
+            />
+            <IconBtn
+              label="Pengaturan"
+              onPress={() => router.push('/settings')}
+              icon={<Settings size={20} color={color.onPrimary} />}
+            />
+          </>
+        )}
+      />
+
+      <View style={[styles.body, wide && styles.bodyWide]}>
+        <View style={[styles.railWrap, wide && styles.railWrapWide]}>
           <CategoryRail
             categories={categories}
             active={active}
             onSelect={setActive}
-            layout={narrow ? 'horizontal' : 'vertical'}
+            layout={wide ? 'vertical' : 'horizontal'}
           />
         </View>
 
         <View style={styles.listWrap}>
           {queue.length > 0 && (
-            <View style={styles.queueBlock}>
+            <Card style={styles.queueCard}>
               <View style={styles.queueHead}>
-                <Text style={styles.queueTitle}>ANTRIAN LOKAL</Text>
-                <Text style={styles.queueCount}>{queue.length}</Text>
+                <SectionLabel>Antrean lokal</SectionLabel>
+                <Text style={styles.queueCount} maxFontSizeMultiplier={scaleCap.label}>{queue.length}</Text>
               </View>
               {queue.map((q) => (
                 <View key={q.clientUploadId} style={styles.queueRow}>
                   <View style={styles.queueMain}>
-                    <Text style={styles.queueName} numberOfLines={1}>{q.name}</Text>
-                    <Text style={[styles.queueState, { color: q.state === 'failed' || q.state === 'source_lost' ? color.red : q.state === 'uploading' ? color.amber : color.textMuted }]}>
-                      {q.state === 'queued' ? 'ANTRE' : q.state === 'uploading' ? 'MENGUNGGAH…' : q.state === 'failed' ? `GAGAL${q.lastError ? ` · ${q.lastError}` : ''}` : 'SUMBER HILANG'}
+                    <Text style={styles.queueName} numberOfLines={1} maxFontSizeMultiplier={scaleCap.label}>
+                      {q.name}
+                    </Text>
+                    <Text
+                      style={[styles.queueState, {
+                        color: q.state === 'failed' || q.state === 'source_lost'
+                          ? color.red
+                          : q.state === 'uploading' ? color.amber : color.textMuted,
+                      }]}
+                      maxFontSizeMultiplier={scaleCap.label}
+                    >
+                      {q.state === 'queued' ? 'Antre' : q.state === 'uploading' ? 'Mengunggah…' : q.state === 'failed' ? `Gagal${q.lastError ? ` · ${q.lastError}` : ''}` : 'Sumber hilang'}
                     </Text>
                   </View>
-                  {(q.state === 'failed') && (
-                    <Pressable onPress={() => void retryQueued(q.clientUploadId)} hitSlop={8} style={({ pressed }) => [styles.queueAct, pressed && { opacity: 0.6 }]}>
-                      <Text style={styles.queueActText}>COBA</Text>
+                  {q.state === 'failed' && (
+                    <Pressable
+                      onPress={() => void retryQueued(q.clientUploadId)}
+                      hitSlop={8}
+                      style={({ pressed }) => [styles.queueAct, pressed && { opacity: 0.6 }]}
+                    >
+                      <Text style={styles.queueActText} maxFontSizeMultiplier={scaleCap.label}>Coba</Text>
                     </Pressable>
                   )}
-                  <Pressable onPress={() => void cancelQueued(q.clientUploadId)} hitSlop={8} style={({ pressed }) => [styles.queueAct, pressed && { opacity: 0.6 }]}>
-                    <Text style={styles.queueActText}>BUANG</Text>
+                  <Pressable
+                    onPress={() => void cancelQueued(q.clientUploadId)}
+                    hitSlop={8}
+                    style={({ pressed }) => [styles.queueAct, pressed && { opacity: 0.6 }]}
+                  >
+                    <Text style={[styles.queueActText, { color: color.red }]} maxFontSizeMultiplier={scaleCap.label}>
+                      Buang
+                    </Text>
                   </Pressable>
                 </View>
               ))}
-            </View>
+            </Card>
           )}
+
           {loading ? (
-            <View style={styles.center}><ActivityIndicator color={color.amber} /><Text style={styles.loadingText}>MEMUAT MANIFEST…</Text></View>
+            <View style={styles.center}>
+              <ActivityIndicator color={color.primary} />
+              <Text style={styles.loadingText} maxFontSizeMultiplier={scaleCap.label}>Memuat manifest…</Text>
+            </View>
           ) : (
             <FlatList
               data={files}
@@ -266,58 +289,59 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
                   onDownload={(f) => void handleDownload(f)}
                 />
               )}
-              refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); void load(); }} tintColor={color.amber} />}
+              refreshControl={
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={() => { setRefreshing(true); void load(); }}
+                  tintColor={color.primary}
+                />
+              }
+              contentContainerStyle={{
+                padding: space(4),
+                paddingBottom: dockBottom + 48,
+                gap: space(2),
+              }}
               ListEmptyComponent={
-                <View style={styles.center}>
-                  <Inbox size={40} strokeWidth={1} color={color.textFaint} />
-                  <Text style={styles.emptyTitle}>GUDANG MASIH KOSONG</Text>
-                  <Text style={styles.emptyBody}>Jatuhkan file pertama — sistem mengirimnya{'\n'}ke lorong kategori yang benar dan mencatatnya di sini.</Text>
-                </View>
+                <EmptyState
+                  icon={<Inbox size={34} color={color.textFaint} />}
+                  title="Gudang masih kosong"
+                  body={'Jatuhkan file pertama — sistem mengirimnya ke lorong kategori yang benar dan mencatatnya di sini.'}
+                />
               }
             />
           )}
         </View>
       </View>
 
-      <View style={styles.footer}>
-        {notice && <Text style={styles.notice} numberOfLines={2}>{notice}</Text>}
-        {selecting ? (
-          <View style={styles.batchBar}>
-            <Text style={styles.batchCount}>{selected.size} DIPILIH</Text>
+      <View pointerEvents="box-none" style={[styles.dock, { bottom: dockBottom }]}>
+        {notice && (
+          <Text style={styles.notice} numberOfLines={2} maxFontSizeMultiplier={scaleCap.label}>
+            {notice}
+          </Text>
+        )}
+        {selecting && (
+          <Card style={styles.batchBar}>
+            <Text style={styles.batchCount} maxFontSizeMultiplier={scaleCap.label}>
+              {selected.size} dipilih
+            </Text>
             <View style={styles.batchActions}>
-              <Pressable onPress={() => batchZip()} disabled={batchBusy} style={({ pressed }) => [styles.batchBtn, pressed && { opacity: 0.7 }]}>
-                <Text style={styles.batchBtnText}>ZIP</Text>
-              </Pressable>
-              <Pressable onPress={() => setMovePicker(true)} disabled={batchBusy}
-                style={({ pressed }) => [styles.batchBtn, pressed && { opacity: 0.7 }]}>
-                <Text style={styles.batchBtnText}>PINDAH</Text>
-              </Pressable>
-              <Pressable onPress={() => void batchDelete()} disabled={batchBusy}
-                style={({ pressed }) => [styles.batchBtnDanger, batchBusy && { opacity: 0.5 }, pressed && { opacity: 0.8 }]}>
-                <Text style={styles.batchBtnDangerText}>HAPUS</Text>
-              </Pressable>
-              <Pressable onPress={clearSelection} style={({ pressed }) => [styles.batchBtn, pressed && { opacity: 0.7 }]}>
-                <Text style={styles.batchBtnText}>BATAL</Text>
-              </Pressable>
+              <Btn label="ZIP" variant="ghost" onPress={() => batchZip()} disabled={batchBusy} />
+              <Btn label="Pindah" variant="ghost" onPress={() => setMovePicker(true)} disabled={batchBusy} />
+              <Btn label="Hapus" variant="danger" onPress={() => void batchDelete()} disabled={batchBusy} />
+              <Btn label="Batal" variant="ghost" onPress={clearSelection} />
             </View>
-          </View>
-        ) : (
-          <Pressable
-            onPress={() => void pickAndUpload()}
-            disabled={uploading}
-            style={({ pressed }) => [styles.uploadBtn, uploading && { opacity: 0.6 }, pressed && { opacity: 0.85 }]}
-          >
-            {uploading
-              ? <ActivityIndicator color={color.base} />
-              : (
-                <View style={styles.uploadInner}>
-                  <Upload size={16} strokeWidth={1.5} color={color.base} />
-                  <Text style={styles.uploadText}>UNGGAH FILE</Text>
-                </View>
-              )}
-          </Pressable>
+          </Card>
         )}
       </View>
+
+      {!selecting && (
+        <Fab
+          label="Unggah berkas"
+          onPress={() => { if (!uploading) void pickAndUpload(); }}
+          icon={uploading ? <ActivityIndicator color={color.onPrimary} /> : <Upload size={24} color={color.onPrimary} />}
+          style={{ bottom: dockBottom }}
+        />
+      )}
 
       <FileDrawer
         file={drawer}
@@ -333,89 +357,63 @@ export function ManifestScreen({ token, me, onLogout }: { token: string; me: str
         <View style={styles.pickerRoot}>
           <Pressable style={styles.pickerBackdrop} onPress={() => setMovePicker(false)} />
           <View style={styles.pickerBox}>
-            <Text style={styles.pickerTitle}>PINDAH {selected.size} FILE KE</Text>
+            <Text style={styles.pickerTitle} maxFontSizeMultiplier={scaleCap.title}>
+              Pindah {selected.size} file ke
+            </Text>
             {categories.map((c) => (
-              <Pressable key={c.key} onPress={() => void batchMove(c.key)}
-                style={({ pressed }) => [styles.pickerRow, pressed && { backgroundColor: color.surfaceAlt }]}>
-                <Text style={styles.pickerRowText}>{c.label}</Text>
+              <Pressable
+                key={c.key}
+                onPress={() => void batchMove(c.key)}
+                style={({ pressed }) => [styles.pickerRow, pressed && { backgroundColor: color.surfaceAlt }]}
+              >
+                <Text style={styles.pickerRowText} maxFontSizeMultiplier={scaleCap.label}>{c.label}</Text>
               </Pressable>
             ))}
           </View>
         </View>
       </Modal>
-    </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: color.base },
-  header: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingHorizontal: space(4), paddingVertical: space(3),
-    borderBottomWidth: 1, borderBottomColor: color.hairline,
-  },
-  brand: { color: color.textPrimary, fontSize: fontSize.lg, fontWeight: '700', letterSpacing: 2 },
-  who: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 1, marginTop: 2 },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: space(2) },
-  syncChip: {
-    flexDirection: 'row', alignItems: 'center', gap: space(1.5),
-    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.chip,
-    paddingHorizontal: space(2.5), paddingVertical: space(1),
-  },
-  dot: { width: 5, height: 5, borderRadius: 3 },
-  syncText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textMuted, letterSpacing: 0.5 },
-  iconBtn: { borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control, paddingHorizontal: space(2.5), paddingVertical: space(1.5) },
-  iconBtnInner: { flexDirection: 'row', alignItems: 'center', gap: space(1.5) },
-  iconBtnText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textMuted, letterSpacing: 1 },
-  body: { flex: 1, flexDirection: 'row' },
-  bodyColumn: { flexDirection: 'column' },
-  railWrap: { width: 172 },
-  railWrapNarrow: { width: '100%', borderBottomWidth: 1, borderBottomColor: color.hairline, paddingHorizontal: space(3) },
+  body: { flex: 1 },
+  bodyWide: { flexDirection: 'row' },
+  railWrap: {},
+  railWrapWide: { width: 208 },
   listWrap: { flex: 1 },
-  queueBlock: { borderBottomWidth: 1, borderBottomColor: color.hairline, backgroundColor: color.surface },
-  queueHead: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: space(3), paddingVertical: space(2),
-    borderBottomWidth: 1, borderBottomColor: color.hairline,
-  },
-  queueTitle: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber, letterSpacing: 2 },
-  queueCount: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textMuted, letterSpacing: 1 },
+  center: { alignItems: 'center', padding: space(8), gap: space(3) },
+  loadingText: { color: color.textFaint, fontSize: fontSize.sm },
+  queueCard: { margin: space(4), marginBottom: 0, padding: space(4), gap: space(2) },
+  queueHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  queueCount: { color: color.textMuted, fontSize: fontSize.sm, fontWeight: '600' },
   queueRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: space(3), paddingVertical: space(2.5),
-    borderBottomWidth: 1, borderBottomColor: color.hairline, gap: space(3),
+    gap: space(3), paddingVertical: space(2),
   },
   queueMain: { flex: 1, minWidth: 0 },
   queueName: { color: color.textPrimary, fontSize: fontSize.sm },
-  queueState: { fontFamily: font.mono, fontSize: fontSize.xs, letterSpacing: 1, marginTop: 2 },
-  queueAct: { paddingHorizontal: space(2), paddingVertical: space(1) },
-  queueActText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.red, letterSpacing: 1 },
-  center: { alignItems: 'center', padding: space(8), gap: space(3) },
-  loadingText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 2 },
-  emptyTitle: { fontFamily: font.mono, fontSize: fontSize.md, color: color.textMuted, letterSpacing: 2 },
-  emptyBody: { color: color.textFaint, fontSize: fontSize.sm, textAlign: 'center', lineHeight: 20 },
-  footer: { borderTopWidth: 1, borderTopColor: color.hairline, padding: space(3), gap: space(2) },
-  notice: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber, letterSpacing: 0.5 },
-  uploadBtn: { backgroundColor: color.amber, borderRadius: radius.control, paddingVertical: space(3.5), alignItems: 'center' },
-  uploadInner: { flexDirection: 'row', alignItems: 'center', gap: space(2) },
-  uploadText: { color: color.base, fontWeight: '700', letterSpacing: 1.5, fontSize: fontSize.sm },
-  batchBar: { gap: space(2) },
-  batchCount: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber, letterSpacing: 1.5 },
-  batchActions: { flexDirection: 'row', gap: space(2), flexWrap: 'wrap' },
-  batchBtn: {
-    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
-    paddingVertical: space(2.5), paddingHorizontal: space(3),
+  queueState: { fontSize: fontSize.xs, marginTop: 2 },
+  queueAct: {
+    minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center',
+    borderRadius: radius.control,
   },
-  batchBtnText: { color: color.textMuted, fontFamily: font.mono, fontSize: fontSize.xs, letterSpacing: 1 },
-  batchBtnDanger: { backgroundColor: color.red, borderRadius: radius.control, paddingVertical: space(2.5), paddingHorizontal: space(3) },
-  batchBtnDangerText: { color: color.base, fontFamily: font.mono, fontSize: fontSize.xs, letterSpacing: 1, fontWeight: '700' },
+  queueActText: { color: color.primary, fontSize: fontSize.sm, fontWeight: '600' },
+  dock: { position: 'absolute', left: space(4), right: space(4), gap: space(2) },
+  notice: { color: color.textMuted, fontSize: fontSize.xs, textAlign: 'center', paddingRight: 72 },
+  batchBar: { padding: space(3), gap: space(2) },
+  batchCount: { color: color.textPrimary, fontSize: fontSize.sm, fontWeight: '600' },
+  batchActions: { flexDirection: 'row', gap: space(2), flexWrap: 'wrap' },
   pickerRoot: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  pickerBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.6)' },
-  pickerBox: { width: '82%', maxWidth: 380, backgroundColor: color.surface, borderWidth: 1, borderColor: color.hairline, padding: space(4) },
-  pickerTitle: { fontFamily: font.mono, fontSize: fontSize.sm, color: color.amber, letterSpacing: 2, marginBottom: space(3) },
+  pickerBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: color.scrim },
+  pickerBox: {
+    width: '82%', maxWidth: 380, backgroundColor: color.surface,
+    borderRadius: radius.sheet, padding: space(5),
+  },
+  pickerTitle: { color: color.textPrimary, fontSize: fontSize.md, fontWeight: '700', marginBottom: space(3) },
   pickerRow: {
-    paddingVertical: space(3), paddingHorizontal: space(2),
-    borderBottomWidth: 1, borderBottomColor: color.hairline,
+    minHeight: 48, justifyContent: 'center', paddingHorizontal: space(2),
+    borderRadius: radius.control,
   },
   pickerRowText: { color: color.textPrimary, fontSize: fontSize.base },
 });

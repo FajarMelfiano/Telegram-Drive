@@ -3,32 +3,35 @@ import {
   ActivityIndicator, FlatList, Pressable, ScrollView,
   StyleSheet, Text, TextInput, View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Search } from 'lucide-react-native';
 import { Api, ApiError, downloadFile, type CategoryRow, type FileRow, type ParsedQuery } from '../api';
 import { ManifestRow } from '../components/ManifestRow';
 import { FileDrawer } from '../components/FileDrawer';
-import { color, font, fontSize, radius, space } from '../theme';
+import { color, fontSize, radius, scaleCap, space } from '../theme';
+import { EmptyState, IconBtn, Screen, ScreenHeader } from '../components/ui';
 
 const SUGGESTIONS = ['pdf laporan juni', 'gambar bulan lalu', 'video >100mb', 'xlsx 2025', 'kemarin'];
 
 function describeParsed(p: ParsedQuery): string[] {
   const chips: string[] = [];
-  if (p.ext) chips.push(`EKSTENSI .${p.ext}`);
-  if (p.category) chips.push(`KATEGORI ${p.category.toUpperCase()}`);
+  if (p.ext) chips.push(`Ekstensi .${p.ext}`);
+  if (p.category) chips.push(`Kategori ${p.category.toUpperCase()}`);
   if (p.dateFrom && p.dateTo) {
     const f = (iso: string) => iso.slice(0, 10);
     chips.push(p.dateFrom.slice(0, 7) === p.dateTo.slice(0, 7)
-      ? `BULAN ${f(p.dateFrom).slice(0, 7)}`
+      ? `Bulan ${f(p.dateFrom).slice(0, 7)}`
       : `${f(p.dateFrom)} → ${f(p.dateTo)}`);
-  } else if (p.dateFrom) chips.push(`SEJAK ${p.dateFrom.slice(0, 10)}`);
-  else if (p.dateTo) chips.push(`SAMPAI ${p.dateTo.slice(0, 10)}`);
+  } else if (p.dateFrom) chips.push(`Sejak ${p.dateFrom.slice(0, 10)}`);
+  else if (p.dateTo) chips.push(`Sampai ${p.dateTo.slice(0, 10)}`);
   if (p.minSize != null) chips.push(`≥ ${Math.round(p.minSize / 1024 / 1024)} MB`);
-  if (p.text) chips.push(`TEKS "${p.text}"`);
+  if (p.text) chips.push(`Teks "${p.text}"`);
   return chips;
 }
 
 /** Cari — chat search: query bahasa sehari-hari → parser → hasil manifest. */
 export function SearchScreen({ token }: { token: string }) {
+  const insets = useSafeAreaInsets();
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState(false);
   const [parsed, setParsed] = useState<ParsedQuery | null>(null);
@@ -66,17 +69,11 @@ export function SearchScreen({ token }: { token: string }) {
   };
 
   return (
-    <View style={styles.root}>
-      <View style={styles.header}>
-        <View style={styles.titleRow}>
-          <Search size={18} strokeWidth={1.5} color={color.amber} />
-          <Text style={styles.title}>CARI</Text>
-        </View>
-        <Text style={styles.sub}>TANYAKAN APA SAJA — “PDF LAPORAN JUNI”, “GAMBAR BULAN LALU”</Text>
-      </View>
+    <Screen>
+      <ScreenHeader title="Cari berkas" subtitle="Tanya apa saja — “pdf laporan juni”, “video >100mb”" />
 
       <View style={styles.inputRow}>
-        <Text style={styles.prompt}>›</Text>
+        <Search size={18} color={color.textFaint} />
         <TextInput
           style={styles.input}
           value={q}
@@ -86,42 +83,58 @@ export function SearchScreen({ token }: { token: string }) {
           placeholderTextColor={color.textFaint}
           returnKeyType="search"
           autoCapitalize="none"
+          maxFontSizeMultiplier={scaleCap.label}
         />
-        <Pressable onPress={() => void run(q)} disabled={busy || !q.trim()}
-          style={({ pressed }) => [styles.goBtn, (busy || !q.trim()) && { opacity: 0.4 }, pressed && { opacity: 0.7 }]}>
-          {busy ? <ActivityIndicator color={color.amber} size="small" /> : <Text style={styles.goText}>CARI</Text>}
-        </Pressable>
+        <IconBtn
+          label="Cari"
+          onPress={() => void run(q)}
+          icon={busy
+            ? <ActivityIndicator color={color.primary} size="small" />
+            : <Search size={18} color={color.primary} />}
+        />
       </View>
 
       {parsed && (
-        <ScrollView horizontal contentContainerStyle={styles.chips} showsHorizontalScrollIndicator={false}>
+        <ScrollView
+          horizontal
+          contentContainerStyle={styles.chips}
+          showsHorizontalScrollIndicator={false}
+        >
           {describeParsed(parsed).map((c) => (
-            <View key={c} style={styles.chip}><Text style={styles.chipText}>{c}</Text></View>
+            <View key={c} style={styles.chip}>
+              <Text style={styles.chipText} maxFontSizeMultiplier={scaleCap.label}>{c}</Text>
+            </View>
           ))}
         </ScrollView>
       )}
 
-      {error && <Text style={styles.error}>{error}</Text>}
+      {error && <Text style={styles.error} maxFontSizeMultiplier={scaleCap.label}>{error}</Text>}
 
       <View style={styles.results}>
         {results === null ? (
-          <View style={styles.center}>
-            <Text style={styles.emptyTitle}>SATPAM SIAP</Text>
-            <Text style={styles.emptyBody}>Parser memahami kategori, nama, ekstensi,{'\n'}bulan, tanggal, dan ukuran.</Text>
+          <EmptyState
+            icon={<Search size={34} color={color.textFaint} />}
+            title="Pencarian siap"
+            body={'Parser memahami kategori, nama, ekstensi, bulan, tanggal, dan ukuran.'}
+          >
             <View style={styles.suggestWrap}>
               {SUGGESTIONS.map((s) => (
-                <Pressable key={s} onPress={() => { setQ(s); void run(s); }}
-                  style={({ pressed }) => [styles.suggest, pressed && { opacity: 0.6 }]}>
-                  <Text style={styles.suggestText}>{s}</Text>
+                <Pressable
+                  key={s}
+                  onPress={() => { setQ(s); void run(s); }}
+                  style={({ pressed }) => [styles.suggest, pressed && { opacity: 0.6 }]}
+                >
+                  <Text style={styles.suggestText} maxFontSizeMultiplier={scaleCap.label}>{s}</Text>
                 </Pressable>
               ))}
             </View>
-          </View>
+          </EmptyState>
         ) : results.length === 0 ? (
-          <View style={styles.center}>
-            <Text style={styles.emptyTitle}>TIDAK ADA DI GUDANG</Text>
-            <Text style={styles.emptyBody}>Coba longgarkan filter — mis. hapus bulannya.</Text>
-          </View>
+          <EmptyState
+            icon={<Search size={34} color={color.textFaint} />}
+            title="Tidak ada di gudang"
+            body="Coba longgarkan filter — mis. hapus bulannya."
+          />
         ) : (
           <FlatList
             data={results}
@@ -135,7 +148,12 @@ export function SearchScreen({ token }: { token: string }) {
                 onDownload={(f) => void handleDownload(f)}
               />
             )}
-            ListHeaderComponent={<Text style={styles.count}>{results.length} HASIL</Text>}
+            contentContainerStyle={{ paddingBottom: insets.bottom + 110, gap: space(2), padding: space(4) }}
+            ListHeaderComponent={
+              <Text style={styles.count} maxFontSizeMultiplier={scaleCap.label}>
+                {results.length} hasil
+              </Text>
+            }
           />
         )}
       </View>
@@ -147,26 +165,22 @@ export function SearchScreen({ token }: { token: string }) {
         onClose={() => setDrawer(null)}
         onDownload={handleDownload}
       />
-    </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: color.base },
-  header: { paddingHorizontal: space(4), paddingVertical: space(3), borderBottomWidth: 1, borderBottomColor: color.hairline },
-  titleRow: { flexDirection: 'row', alignItems: 'center', gap: space(2) },
-  title: { color: color.textPrimary, fontSize: fontSize.lg, fontWeight: '700', letterSpacing: 2 },
-  sub: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 1, marginTop: 2 },
   inputRow: {
     flexDirection: 'row', alignItems: 'center', gap: space(2),
     marginHorizontal: space(4), marginTop: space(4),
-    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
-    backgroundColor: color.surface, paddingHorizontal: space(3),
+    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.container,
+    backgroundColor: color.surface, paddingLeft: space(3.5), paddingRight: space(1.5),
+    minHeight: 48,
   },
-  prompt: { fontFamily: font.mono, fontSize: fontSize.lg, color: color.amber },
-  input: { flex: 1, color: color.textPrimary, fontFamily: font.mono, fontSize: fontSize.base, paddingVertical: space(3) },
-  goBtn: { paddingHorizontal: space(3), paddingVertical: space(2), borderRadius: radius.control, backgroundColor: color.amberDim },
-  goText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber, letterSpacing: 1 },
+  input: {
+    flex: 1, color: color.textPrimary, fontSize: fontSize.base,
+    paddingVertical: space(3),
+  },
   chips: {
     gap: space(2), padding: space(4), paddingBottom: space(2),
     // ScrollView horizontal di web punya alignItems 'stretch' default → chip
@@ -174,21 +188,17 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
   },
   chip: {
-    borderWidth: 1, borderColor: color.amberDim, borderRadius: radius.chip,
-    paddingHorizontal: space(2.5), paddingVertical: space(1),
-    backgroundColor: color.surface, // alas solid turunkan kontras tepi → fringe minim
+    borderRadius: radius.chip, paddingHorizontal: space(3), paddingVertical: space(1.5),
+    backgroundColor: color.primarySoft,
   },
-  chipText: {
-    fontFamily: font.mono, fontSize: fontSize.xs, color: color.amber,
-    letterSpacing: 0.3, fontWeight: '500', // glyph lebih berat & rapat = tepi lebih bersih
-  },
+  chipText: { color: color.primary, fontSize: fontSize.xs, fontWeight: '600' },
   error: { color: color.red, fontSize: fontSize.sm, paddingHorizontal: space(4) },
   results: { flex: 1, marginTop: space(2) },
-  center: { alignItems: 'center', padding: space(8), gap: space(3) },
-  emptyTitle: { fontFamily: font.mono, fontSize: fontSize.md, color: color.textMuted, letterSpacing: 2 },
-  emptyBody: { color: color.textFaint, fontSize: fontSize.sm, textAlign: 'center', lineHeight: 20 },
   suggestWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: space(2), justifyContent: 'center', marginTop: space(3) },
-  suggest: { borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control, paddingHorizontal: space(3), paddingVertical: space(2) },
-  suggestText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textMuted },
-  count: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 1, paddingHorizontal: space(4), paddingVertical: space(2) },
+  suggest: {
+    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.chip,
+    paddingHorizontal: space(3), paddingVertical: space(2), backgroundColor: color.surface,
+  },
+  suggestText: { color: color.textMuted, fontSize: fontSize.xs },
+  count: { color: color.textFaint, fontSize: fontSize.xs, paddingHorizontal: space(4), paddingVertical: space(2) },
 });

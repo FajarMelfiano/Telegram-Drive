@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator, FlatList, Image, Modal, Pressable, RefreshControl,
-  StyleSheet, Text, TextInput, View,
+  StyleSheet, Text, TextInput, View, useWindowDimensions,
 } from 'react-native';
-import { ArrowLeft, FolderPlus, Images, Plus, Trash2 } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { FolderPlus, Images, Plus, Trash2 } from 'lucide-react-native';
 import { Api, ApiError, usePreviewUri, type AlbumRow, type FileRow } from '../api';
 import { glyphFor, tinted } from '../fileType';
-import { color, font, fontSize, radius, space } from '../theme';
+import { color, fontSize, radius, scaleCap, space } from '../theme';
+import { EmptyState, IconBtn, Screen, ScreenHeader } from '../components/ui';
 
 /** Satu sel contact-sheet: thumbnail gambar atau glyph berwarna, plus nama. */
 function SheetCell({ file, token, onPress }: { file: FileRow; token: string | null; onPress: () => void }) {
@@ -16,7 +18,8 @@ function SheetCell({ file, token, onPress }: { file: FileRow; token: string | nu
   const previewUri = usePreviewUri(file, token, canThumb);
 
   return (
-    <Pressable style={styles.cell} onPress={onPress}>
+    <Pressable style={styles.cell} onPress={onPress} accessibilityRole="imagebutton"
+      accessibilityLabel={file.displayName || file.name}>
       <View style={[styles.thumb, { backgroundColor: tinted(glyph.color, 0.1), borderColor: color.hairline }]}>
         {canThumb && !fail ? (
           <Image
@@ -26,20 +29,24 @@ function SheetCell({ file, token, onPress }: { file: FileRow; token: string | nu
             onError={() => setFail(true)}
           />
         ) : (
-          <glyph.Icon size={28} strokeWidth={1.2} color={glyph.color} />
+          <glyph.Icon size={26} strokeWidth={1.2} color={glyph.color} />
         )}
       </View>
-      <Text style={styles.cellName} numberOfLines={1}>{file.displayName || file.name}</Text>
+      <Text style={styles.cellName} numberOfLines={1} maxFontSizeMultiplier={scaleCap.label}>
+        {file.displayName || file.name}
+      </Text>
     </Pressable>
   );
 }
 
 /**
- * Album — koleksi manual lintas kategori (kontak-sheet). Daftar album di kiri
- * (atau atas di layar sempit), isi album sebagai grid contact-sheet.
- * Tambah/hapus album, buka file → drawer tidak di sini (cukup lihat).
+ * Album — koleksi manual lintas kategori (kontak-sheet). Daftar album
+ * (atau grid di layar sempit), isi album sebagai grid contact-sheet.
  */
 export function AlbumScreen({ token, onBack }: { token: string; onBack: () => void }) {
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const cols = width >= 640 ? 4 : 3;
   const [albums, setAlbums] = useState<AlbumRow[]>([]);
   const [active, setActive] = useState<AlbumRow | null>(null);
   const [files, setFiles] = useState<FileRow[]>([]);
@@ -106,64 +113,92 @@ export function AlbumScreen({ token, onBack }: { token: string; onBack: () => vo
   };
 
   return (
-    <View style={styles.root}>
-      <View style={styles.header}>
-        <Pressable onPress={active ? () => setActive(null) : onBack} hitSlop={8} style={({ pressed }) => [styles.back, pressed && { opacity: 0.6 }]}>
-          <ArrowLeft size={18} strokeWidth={1.5} color={color.textMuted} />
-        </Pressable>
-        <View style={styles.headMain}>
-          <Text style={styles.brand}>{active ? active.name.toUpperCase() : 'ALBUM'}</Text>
-          <Text style={styles.sub}>{active ? `${files.length} FILE` : `${albums.length} KOLEKSI`}</Text>
-        </View>
-        {!active && (
-          <Pressable onPress={() => setCreating(true)} hitSlop={8} style={({ pressed }) => [styles.back, pressed && { opacity: 0.6 }]}>
-            <FolderPlus size={17} strokeWidth={1.5} color={color.amber} />
-          </Pressable>
-        )}
-      </View>
+    <Screen>
+      <ScreenHeader
+        title={active ? active.name : 'Album'}
+        subtitle={active ? `${files.length} file` : `${albums.length} koleksi`}
+        onBack={active ? () => setActive(null) : onBack}
+        right={!active ? (
+          <IconBtn
+            label="Album baru"
+            onPress={() => setCreating(true)}
+            icon={<FolderPlus size={20} color={color.onPrimary} />}
+          />
+        ) : undefined}
+      />
 
-      {notice && <Text style={styles.notice}>{notice}</Text>}
+      {notice && <Text style={styles.notice} maxFontSizeMultiplier={scaleCap.label}>{notice}</Text>}
 
       {loading ? (
-        <View style={styles.center}><ActivityIndicator color={color.amber} /><Text style={styles.loadingText}>MEMUAT ALBUM…</Text></View>
+        <View style={styles.center}>
+          <ActivityIndicator color={color.primary} />
+          <Text style={styles.loadingText} maxFontSizeMultiplier={scaleCap.label}>Memuat album…</Text>
+        </View>
       ) : !active ? (
         <FlatList
           data={albums}
           keyExtractor={(a) => String(a.id)}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); void load(); }} tintColor={color.amber} />}
-          contentContainerStyle={styles.listContent}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={() => { setRefreshing(true); void load(); }}
+              tintColor={color.primary}
+            />
+          }
+          contentContainerStyle={{
+            padding: space(4), paddingBottom: insets.bottom + 110, gap: space(2),
+          }}
           renderItem={({ item }) => (
-            <Pressable style={styles.albumRow} onPress={() => setActive(item)}>
-              <Images size={18} strokeWidth={1.5} color={color.amber} />
-              <View style={styles.albumMain}>
-                <Text style={styles.albumName}>{item.name}</Text>
-                <Text style={styles.albumCount}>{item.fileCount} FILE · {new Date(item.createdAt).toISOString().slice(0, 10)}</Text>
+            <Pressable
+              style={styles.albumRow}
+              onPress={() => setActive(item)}
+              accessibilityRole="button"
+              accessibilityLabel={`Buka album ${item.name}`}
+            >
+              <View style={styles.albumIcon}>
+                <Images size={18} strokeWidth={1.5} color={color.primary} />
               </View>
-              <Pressable onPress={() => void removeAlbum(item.id)} hitSlop={8} style={({ pressed }) => [styles.rowAction, pressed && { opacity: 0.6 }]}>
-                <Trash2 size={15} strokeWidth={1.5} color={color.red} />
+              <View style={styles.albumMain}>
+                <Text style={styles.albumName} maxFontSizeMultiplier={scaleCap.label}>{item.name}</Text>
+                <Text style={styles.albumCount} maxFontSizeMultiplier={scaleCap.label}>
+                  {item.fileCount} file · {new Date(item.createdAt).toISOString().slice(0, 10)}
+                </Text>
+              </View>
+              <Pressable
+                onPress={() => void removeAlbum(item.id)}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel={`Hapus album ${item.name}`}
+                style={({ pressed }) => [styles.rowAction, pressed && { opacity: 0.6 }]}
+              >
+                <Trash2 size={16} strokeWidth={1.5} color={color.red} />
               </Pressable>
             </Pressable>
           )}
           ListEmptyComponent={
-            <View style={styles.center}>
-              <Images size={40} strokeWidth={1} color={color.textFaint} />
-              <Text style={styles.emptyTitle}>BELUM ADA ALBUM</Text>
-              <Text style={styles.emptyBody}>Koleksi manual lintas kategori —{'\n'}kumpulkan file pilihanmu di sini.</Text>
-            </View>
+            <EmptyState
+              icon={<Images size={34} color={color.textFaint} />}
+              title="Belum ada album"
+              body={'Koleksi manual lintas kategori — kumpulkan file pilihanmu di sini.'}
+            />
           }
         />
       ) : (
         <FlatList
           data={files}
           keyExtractor={(f) => String(f.id)}
-          numColumns={3}
-          contentContainerStyle={styles.gridContent}
+          numColumns={cols}
+          contentContainerStyle={{
+            padding: space(3), paddingBottom: insets.bottom + 110, gap: space(2),
+          }}
+          columnWrapperStyle={cols > 1 ? { gap: space(2) } : undefined}
           renderItem={({ item }) => <SheetCell file={item} token={token} onPress={() => undefined} />}
           ListEmptyComponent={
-            <View style={styles.center}>
-              <Text style={styles.emptyTitle}>ALBUM KOSONG</Text>
-              <Text style={styles.emptyBody}>Tambahkan file dari manifest lewat menu album.</Text>
-            </View>
+            <EmptyState
+              icon={<Images size={34} color={color.textFaint} />}
+              title="Album kosong"
+              body="Tambahkan file dari manifest lewat menu album."
+            />
           }
         />
       )}
@@ -173,7 +208,7 @@ export function AlbumScreen({ token, onBack }: { token: string; onBack: () => vo
         <View style={styles.dialogRoot}>
           <Pressable style={styles.dialogBackdrop} onPress={() => setCreating(false)} />
           <View style={styles.dialog}>
-            <Text style={styles.dialogTitle}>ALBUM BARU</Text>
+            <Text style={styles.dialogTitle} maxFontSizeMultiplier={scaleCap.title}>Album baru</Text>
             <TextInput
               style={styles.dialogInput}
               value={newName}
@@ -182,69 +217,77 @@ export function AlbumScreen({ token, onBack }: { token: string; onBack: () => vo
               placeholder="nama koleksi"
               placeholderTextColor={color.textFaint}
               onSubmitEditing={() => void createAlbum()}
+              maxFontSizeMultiplier={scaleCap.label}
             />
             <View style={styles.dialogActions}>
-              <Pressable onPress={() => setCreating(false)} style={({ pressed }) => [styles.dialogBtn, pressed && { opacity: 0.6 }]}>
-                <Text style={styles.dialogBtnText}>BATAL</Text>
+              <Pressable
+                onPress={() => setCreating(false)}
+                style={({ pressed }) => [styles.dialogBtn, pressed && { opacity: 0.6 }]}
+              >
+                <Text style={styles.dialogBtnText} maxFontSizeMultiplier={scaleCap.label}>Batal</Text>
               </Pressable>
-              <Pressable onPress={() => void createAlbum()} disabled={busy || !newName.trim()}
-                style={({ pressed }) => [styles.dialogBtnPrimary, (busy || !newName.trim()) && { opacity: 0.5 }, pressed && { opacity: 0.85 }]}>
-                <Plus size={15} strokeWidth={2} color={color.base} />
-                <Text style={styles.dialogBtnPrimaryText}>BUAT</Text>
+              <Pressable
+                onPress={() => void createAlbum()}
+                disabled={busy || !newName.trim()}
+                style={({ pressed }) => [styles.dialogBtnPrimary, (busy || !newName.trim()) && { opacity: 0.5 }, pressed && { opacity: 0.85 }]}
+              >
+                <Plus size={16} strokeWidth={2} color={color.onPrimary} />
+                <Text style={styles.dialogBtnPrimaryText} maxFontSizeMultiplier={scaleCap.label}>Buat</Text>
               </Pressable>
             </View>
           </View>
         </View>
       </Modal>
-    </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: color.base },
-  header: {
-    flexDirection: 'row', alignItems: 'center', gap: space(3),
-    paddingHorizontal: space(4), paddingVertical: space(3),
-    borderBottomWidth: 1, borderBottomColor: color.hairline,
-  },
-  back: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control },
-  headMain: { flex: 1 },
-  brand: { color: color.textPrimary, fontSize: fontSize.lg, fontWeight: '700', letterSpacing: 2 },
-  sub: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 1, marginTop: 2 },
-  notice: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.red, letterSpacing: 0.5, paddingHorizontal: space(4), paddingTop: space(3) },
   center: { alignItems: 'center', padding: space(8), gap: space(3) },
-  loadingText: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 2 },
-  emptyTitle: { fontFamily: font.mono, fontSize: fontSize.md, color: color.textMuted, letterSpacing: 2 },
-  emptyBody: { color: color.textFaint, fontSize: fontSize.sm, textAlign: 'center', lineHeight: 20 },
-  listContent: { padding: space(3) },
+  loadingText: { color: color.textFaint, fontSize: fontSize.sm },
+  notice: { color: color.red, fontSize: fontSize.xs, paddingHorizontal: space(4), paddingTop: space(3) },
   albumRow: {
     flexDirection: 'row', alignItems: 'center', gap: space(3),
-    paddingHorizontal: space(3), paddingVertical: space(3.5),
-    borderBottomWidth: 1, borderBottomColor: color.hairline,
+    backgroundColor: color.surface, borderWidth: 1, borderColor: color.hairline,
+    borderRadius: radius.card, paddingHorizontal: space(3), paddingVertical: space(3),
+  },
+  albumIcon: {
+    width: 40, height: 40, borderRadius: radius.control, backgroundColor: color.primarySoft,
+    alignItems: 'center', justifyContent: 'center',
   },
   albumMain: { flex: 1 },
   albumName: { color: color.textPrimary, fontSize: fontSize.base, fontWeight: '600' },
-  albumCount: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textFaint, letterSpacing: 0.5, marginTop: 2 },
-  rowAction: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
-  gridContent: { padding: space(2) },
-  cell: { flex: 1 / 3, margin: space(1.5), maxWidth: '33.33%' },
-  thumb: { width: '100%', aspectRatio: 1, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderRadius: radius.control, overflow: 'hidden' },
+  albumCount: { color: color.textFaint, fontSize: fontSize.xs, marginTop: 2 },
+  rowAction: {
+    width: 44, height: 44, alignItems: 'center', justifyContent: 'center',
+    borderRadius: radius.control,
+  },
+  cell: { flex: 1 },
+  thumb: {
+    width: '100%', aspectRatio: 1, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderRadius: radius.control, overflow: 'hidden',
+  },
   thumbImg: { width: '100%', height: '100%' },
-  cellName: { fontFamily: font.mono, fontSize: fontSize.xs, color: color.textMuted, marginTop: space(1.5) },
+  cellName: { color: color.textMuted, fontSize: fontSize.xs, marginTop: space(1.5) },
   dialogRoot: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  dialogBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.6)' },
-  dialog: { width: '86%', maxWidth: 400, backgroundColor: color.surface, borderWidth: 1, borderColor: color.hairline, padding: space(5) },
-  dialogTitle: { fontFamily: font.mono, fontSize: fontSize.sm, color: color.amber, letterSpacing: 2, marginBottom: space(4) },
+  dialogBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: color.scrim },
+  dialog: {
+    width: '86%', maxWidth: 400, backgroundColor: color.surface,
+    borderRadius: radius.sheet, padding: space(5),
+  },
+  dialogTitle: { color: color.textPrimary, fontSize: fontSize.md, fontWeight: '700', marginBottom: space(4) },
   dialogInput: {
-    borderWidth: 1, borderColor: color.hairline, backgroundColor: color.base, color: color.textPrimary,
-    paddingHorizontal: space(3), paddingVertical: space(3), fontSize: fontSize.base,
+    borderWidth: 1, borderColor: color.hairline, borderRadius: radius.control,
+    backgroundColor: color.surface, color: color.textPrimary,
+    paddingHorizontal: space(3.5), paddingVertical: space(3), fontSize: fontSize.base,
   },
   dialogActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: space(2), marginTop: space(4) },
-  dialogBtn: { paddingVertical: space(3), paddingHorizontal: space(3) },
-  dialogBtnText: { color: color.textMuted, fontFamily: font.mono, fontSize: fontSize.xs, letterSpacing: 1 },
+  dialogBtn: { minHeight: 44, justifyContent: 'center', paddingHorizontal: space(3) },
+  dialogBtnText: { color: color.textMuted, fontSize: fontSize.sm },
   dialogBtnPrimary: {
     flexDirection: 'row', alignItems: 'center', gap: space(1.5),
-    backgroundColor: color.amber, borderRadius: radius.control, paddingVertical: space(2.5), paddingHorizontal: space(4),
+    backgroundColor: color.primary, borderRadius: radius.control,
+    minHeight: 44, paddingHorizontal: space(4), paddingVertical: space(2.5),
   },
-  dialogBtnPrimaryText: { color: color.base, fontWeight: '700', letterSpacing: 1, fontSize: fontSize.sm },
+  dialogBtnPrimaryText: { color: color.onPrimary, fontWeight: '700', fontSize: fontSize.sm },
 });

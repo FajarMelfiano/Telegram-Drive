@@ -4,10 +4,10 @@ import { useAuth } from '../../auth';
 import { ManifestScreen } from '../../screens/ManifestScreen';
 
 export default function ManifestRoute() {
-  const { status, token, me, signOut } = useAuth();
+  const { status, token, me } = useAuth();
 
   if (status === 'loading') return <BootScreen />;
   if (status === 'signedOut' || !token) return <Redirect href="/login" />;
 
-  return <ManifestScreen token={token} me={me} onLogout={signOut} />;
+  return <ManifestScreen token={token} me={me} />;
 }
