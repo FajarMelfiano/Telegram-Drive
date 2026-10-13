@@ -8,6 +8,7 @@ import {
   Api as TgApi,
   password as tgPassword,
   sessions,
+  extensions,
 } from 'teleproto';
 
 const { StringSession } = sessions;
@@ -78,6 +79,10 @@ export class TeleprotoGateway implements TelegramGateway {
   static async create(apiId: number, apiHash: string, session?: string): Promise<TeleprotoGateway> {
     const client = new TelegramClient(new StringSession(session ?? ''), apiId, apiHash, {
       connectionRetries: 5,
+      // Hermes/RN tidak punya net.Socket (stub melempar) — wajib transport
+      // WebSocket. Server sengaja memakai default TCP; di APK kita ganti ke
+      // PromisedWebSockets (sama seperti Spike B yang terbukti jalan di Android).
+      networkSocket: extensions.PromisedWebSockets,
     });
     await client.connect();
     return new TeleprotoGateway(client, apiId, apiHash);
